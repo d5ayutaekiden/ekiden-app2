@@ -1,0 +1,2581 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>女子駅伝部 練習記録</title>
+  <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
+  <style>
+    body { font-family: 'Helvetica Neue', Arial, 'Hiragino Kaku Gothic ProN', Meiryo, sans-serif; background: linear-gradient(135deg, #fafafa 0%, #f5f5f5 100%); }
+    .tmpl-btn { font-size: 11px; padding: 2px 7px; background: #f3f4f6; border: 1px solid #d1d5db; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
+    .tmpl-btn:hover { background: #e0f2fe; }
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { opacity: 1; }
+    .tab-active { border-bottom: 3px solid #a52a2a; color: #a52a2a; background: linear-gradient(180deg, rgba(165, 42, 42, 0.05) 0%, transparent 100%); font-weight: 600; }
+    .tab-inactive { border-bottom: 3px solid transparent; color: #999; transition: all 0.2s; }
+    .tab-inactive:hover { color: #666; }
+    .modal-overlay { position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50;display:flex;align-items:center;justify-content:center;padding:1rem; }
+    .sync-toast { position:fixed;bottom:1.25rem;right:1rem;z-index:60;padding:.6rem 1rem;border-radius:.75rem;font-size:.8rem;font-weight:600;box-shadow:0 4px 12px rgba(0,0,0,.15);animation:slideUp .25s ease; }
+    @keyframes slideUp { from{transform:translateY(20px);opacity:0} to{transform:translateY(0);opacity:1} }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ======================================================
+// CONSTANTS
+// ======================================================
+const YEARS = ['4年', '3年', '2年', '1年'];
+const STATUS_DIVS  = ['通常', '故障', '復帰', '体調不良', '特記事項', '未入力'];
+const SESSION_TYPES = ['トラック', 'ロード', 'クロカン'];
+const SESSION_NAMES = ['朝練習', '本練習'];
+
+const TMPL_DIST      = [200, 300, 400, 600, 800, 1000, 1200, 1600, 2000, 3000];
+const TMPL_REPS      = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20];
+const TMPL_SETS      = [1, 2, 3, 4];
+const TMPL_TARGET    = ['36"切', '40"', '72"', '76"', "3'10\"", "3'15\"", "3'20\"", "3'30\"", 'LT', 'Free'];
+const TMPL_REST_REPS = ['R=60"', 'R=90"', "R=2'00\"", "R=3'00\"", 'R=200m jog', 'R=200m60"', 'R=400m jog'];
+const TMPL_REST_SETS = ['(空欄)', "set R=3'00\"", "set R=5'00\"", 'set R=400m jog'];
+
+const CSV_HEADERS = [
+  '日付','氏名','学年','状態区分','練習タイプ','実施タイプ','場所','内容タグ',
+  '距離km','時間分','ブロックNo','距離m','本数','セット数','設定',
+  '本数間レスト','セット間レスト','ポイント距離km','セッション表示名','表示用メニュー','備考'
+];
+
+// ======================================================
+// UTILS
+// ======================================================
+let _seq = 0;
+function uid() { return `${Date.now()}_${++_seq}_${Math.random().toString(36).slice(2,6)}`; }
+function today() { return new Date().toISOString().slice(0, 10); }
+
+function buildJogMenu(tag, km, min) {
+  const parts = [tag || ''];
+  if (km !== '' && km !== undefined && km !== null && km !== 0) parts.push(`${km}km`);
+  if (min !== '' && min !== undefined && min !== null && min !== 0) parts.push(`${min}分`);
+  return parts.filter(Boolean).join(' ').trim();
+}
+
+function buildPointMenu(b) {
+  if (!b.distanceM && !b.reps) return '(未入力)';
+  let s = `${b.distanceM || '?'}m×${b.reps || '?'}本`;
+  if (parseInt(b.sets) > 1) s += `×${b.sets}set`;
+  if (b.target) s += ` ${b.target}`;
+  if (b.restBetweenReps) s += ` ${b.restBetweenReps}`;
+  if (b.restBetweenSets) s += ` ${b.restBetweenSets}`;
+  return s;
+}
+
+function buildSessionMenu(blocks) {
+  return blocks.filter(b => b.distanceM).map(b => {
+    const reps = parseInt(b.reps) || 1;
+    const sets = parseInt(b.sets) || 1;
+    if (reps === 1 && sets === 1) return `${b.distanceM}m`;
+    if (sets === 1) return `${b.distanceM}m×${reps}本`;
+    return `(${b.distanceM}m×${reps}本)×${sets}set`;
+  }).join('+');
+}
+
+function calcPointKm(distanceM, reps, sets) {
+  const d = parseFloat(distanceM) || 0;
+  const r = parseInt(reps) || 0;
+  const s = parseInt(sets) || 1;
+  return Math.round(d * r * s / 100) / 10;
+}
+
+function newBlock(n) {
+  return { id: uid(), blockNo: n, distanceM: '', reps: '', sets: 1, target: '', restBetweenReps: '', restBetweenSets: '', note: '' };
+}
+
+function recordToRow(r) {
+  return [
+    r.date, r.name, r.year, r.statusDiv, r.practiceType, r.sessionType || '', r.location, r.contentTag || '',
+    r.distanceKm ?? '', r.durationMin ?? '',
+    r.blockNo ?? '', r.distanceM ?? '', r.reps ?? '', r.sets ?? '', r.target || '',
+    r.restBetweenReps || '', r.restBetweenSets || '', r.pointDistanceKm ?? '',
+    r.sessionMenu || '', r.displayMenu || '', r.note || ''
+  ];
+}
+
+function toCSV(records) {
+  const esc = v => {
+    const s = String(v ?? '');
+    return (s.includes(',') || s.includes('"') || s.includes('\n')) ? `"${s.replace(/"/g,'""')}"` : s;
+  };
+  return [CSV_HEADERS, ...records.map(recordToRow)].map(row => row.map(esc).join(',')).join('\n');
+}
+
+function downloadCSV(records, filename) {
+  const bom = '﻿';
+  const blob = new Blob([bom + toCSV(records)], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename; a.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function buildPdfHtml(date, sessionName, meta, records) {
+  const yOrder = { '4年': 0, '3年': 1, '2年': 2, '1年': 3 };
+
+  // ポイント練習は選手ごとに複数レコード(ブロック数分)があるため、
+  // 名前でユニーク化して1行/選手にまとめる（blockNo=1優先 → sessionMenu使用）
+  const seenNames = new Set();
+  const unique = [];
+  records.forEach(r => {
+    if (!seenNames.has(r.name)) {
+      seenNames.add(r.name);
+      unique.push(r);
+    }
+  });
+
+  const sorted = [...unique].sort((a, b) => {
+    if (yOrder[a.year] !== yOrder[b.year]) return (yOrder[a.year] ?? 9) - (yOrder[b.year] ?? 9);
+    return a.name.localeCompare(b.name, 'ja');
+  });
+  const temp = (meta.temperature !== undefined && meta.temperature !== '') ? meta.temperature + '℃' : '—';
+  const hum  = (meta.humidity !== undefined && meta.humidity !== '') ? meta.humidity + '%' : '—';
+  const wind = meta.wind || '—';
+  const loc  = meta.location || '—';
+  const dataRows = sorted.map(r => {
+    const isInjured = r.statusDiv === '故障';
+    const rowBg  = isInjured ? 'background:#fff0f0;' : '';
+    const nameSt = isInjured ? 'color:#dc2626;font-weight:bold;' : '';
+    const dist = r.practiceType === 'ジョグ・各自'
+      ? (r.distanceKm !== '' && r.distanceKm !== undefined ? `${r.distanceKm}km` : '—') : '—';
+    const time = r.practiceType === 'ジョグ・各自'
+      ? (r.durationMin !== '' && r.durationMin !== undefined ? `${r.durationMin}分` : '—') : '—';
+    // ポイント: sessionMenu（全体像）を表示、なければ displayMenu
+    const section = r.practiceType === 'ポイント練習'
+      ? (r.sessionMenu || r.displayMenu || '—') : '—';
+    const nameLabel = `${r.year} ${r.name}${isInjured ? ' ★故障' : ''}`;
+    return `<tr style="${rowBg}">
+      <td style="border:1px solid #ccc;padding:5px 8px;font-size:12px;${nameSt}">${nameLabel}</td>
+      <td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:12px;">${dist}</td>
+      <td style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:12px;">${time}</td>
+      <td style="border:1px solid #ccc;padding:5px 8px;font-size:12px;">${section}</td>
+      <td style="border:1px solid #ccc;padding:5px 8px;font-size:12px;">${r.note || ''}</td>
+    </tr>`;
+  }).join('');
+  return `<div style="font-family:'Helvetica Neue',Arial,'Hiragino Kaku Gothic ProN',Meiryo,sans-serif;padding:16px;">
+    <div style="text-align:center;font-size:17px;font-weight:bold;margin-bottom:8px;">${date}（${sessionName}）練習記録</div>
+    <div style="display:flex;gap:20px;font-size:12px;color:#555;margin-bottom:12px;flex-wrap:wrap;">
+      <span>📍 ${loc}</span>
+      <span>🌡 ${temp}</span>
+      <span>💧 ${hum}</span>
+      <span>💨 ${wind}</span>
+    </div>
+    <table style="width:100%;border-collapse:collapse;">
+      <thead>
+        <tr style="background:#f3f4f6;">
+          <th style="border:1px solid #ccc;padding:5px 8px;text-align:left;font-size:12px;">名前</th>
+          <th style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:12px;">距離(km)</th>
+          <th style="border:1px solid #ccc;padding:5px 8px;text-align:right;font-size:12px;">時間(分)</th>
+          <th style="border:1px solid #ccc;padding:5px 8px;text-align:left;font-size:12px;">セクション / メニュー</th>
+          <th style="border:1px solid #ccc;padding:5px 8px;text-align:left;font-size:12px;">備考</th>
+        </tr>
+      </thead>
+      <tbody>${dataRows}</tbody>
+    </table>
+  </div>`;
+}
+
+async function postToSheets(scriptUrl, records) {
+  await fetch(scriptUrl, {
+    method: 'POST',
+    mode: 'no-cors',
+    headers: { 'Content-Type': 'text/plain' },
+    body: JSON.stringify(records),
+  });
+}
+
+async function testSheetConnection(scriptUrl) {
+  const valid = /^https:\/\/script\.google\.com\/macros\/s\/.+\/exec/.test(scriptUrl);
+  if (!valid) return { ok: false, reason: 'format' };
+  return { ok: true };
+}
+
+async function fetchMasterData(scriptUrl) {
+  try {
+    const res = await fetch(scriptUrl);
+    const json = await res.json();
+    return json;
+  } catch {
+    return null;
+  }
+}
+
+// ======================================================
+// HOOKS
+// ======================================================
+function useLS(key, init) {
+  const [val, setVal] = useState(() => {
+    try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : init; }
+    catch { return init; }
+  });
+  useEffect(() => { try { localStorage.setItem(key, JSON.stringify(val)); } catch {} }, [key, val]);
+  return [val, setVal];
+}
+
+// ======================================================
+// SHEETS COMPONENTS
+// ======================================================
+function SyncToast({ state }) {
+  if (!state) return null;
+  const cfg = {
+    syncing: { bg: 'bg-blue-600 text-white',   icon: '🔄', msg: 'Sheetsに送信中...' },
+    ok:      { bg: 'bg-green-600 text-white',  icon: '✅', msg: `Sheets送信完了（${state.count}件）` },
+    error:   { bg: 'bg-red-500 text-white',    icon: '❌', msg: '送信失敗 — ローカルには保存済み。【再送】で手動再送できます' },
+  }[state.status] || null;
+  if (!cfg) return null;
+  return (
+    <div className={`sync-toast ${cfg.bg}`}>
+      {cfg.icon} {cfg.msg}
+    </div>
+  );
+}
+
+function SettingsModal({ scriptUrl, onSave, onClose }) {
+  const [url, setUrl]         = useState(scriptUrl);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+
+  const handleTest = async () => {
+    if (!url.trim()) return;
+    setTesting(true); setTestResult(null);
+    try {
+      const result = await testSheetConnection(url.trim());
+      setTestResult(result.ok ? 'ok' : result.reason === 'format' ? 'format' : 'error');
+    } catch {
+      setTestResult('error');
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-5">
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-bold text-gray-800">⚙ Google Sheets 連携設定</h2>
+          <button type="button" onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+        </div>
+
+        <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-800 leading-relaxed">
+          <strong>設定手順</strong><br/>
+          1. Google Sheets → 拡張機能 → Apps Script にコードを貼り付けて保存<br/>
+          2. 「デプロイ」→「新しいデプロイ」→ ウェブアプリ<br/>
+          3. 実行ユーザー：自分　／　アクセス：全員<br/>
+          4. 発行されたURLを下に貼り付け
+        </div>
+
+        <label className="block mb-3">
+          <span className="block text-xs text-gray-500 mb-1 font-semibold">Apps Script URL</span>
+          <input type="url" value={url} onChange={e => { setUrl(e.target.value); setTestResult(null); }}
+            placeholder="https://script.google.com/macros/s/..."
+            className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-300 outline-none font-mono" />
+        </label>
+
+        <div className="flex items-center gap-2 mb-5">
+          <button type="button" onClick={handleTest} disabled={!url.trim() || testing}
+            className="px-4 py-1.5 text-sm border border-blue-400 text-blue-600 rounded-lg hover:bg-blue-50 disabled:opacity-40 transition-colors">
+            {testing ? '確認中...' : '接続テスト'}
+          </button>
+          {testResult === 'ok'     && <span className="text-xs text-green-700 font-medium">✅ URLの形式OK<br/><span className="text-gray-500 font-normal">保存後、ジョグを1件入力して保存→Sheetsに行が追加されれば接続成功です</span></span>}
+          {testResult === 'format' && <span className="text-xs text-red-600 font-medium">❌ URLの形式が違います<br/><span className="text-gray-500">https://script.google.com/macros/s/.../exec の形式か確認してください</span></span>}
+          {testResult === 'error'  && <span className="text-xs text-red-600 font-medium">❌ 送信できませんでした<br/><span className="text-gray-500">デプロイ設定「アクセス：全員」を再確認してください</span></span>}
+        </div>
+
+        <div className="flex gap-2 justify-end">
+          <button type="button" onClick={onClose}
+            className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">キャンセル</button>
+          <button type="button" onClick={() => { onSave(url.trim()); onClose(); }}
+            className="px-5 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors shadow-sm">
+            保存
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// SHARED COMPONENTS
+// ======================================================
+function CustomTmplField({ label, required, value, onChange, placeholder, type,
+                           defaultItems, customItems, onAddCustom, onRemoveCustom }) {
+  const [adding, setAdding] = useState(false);
+  const [newVal, setNewVal] = useState('');
+  const handleAdd = () => {
+    const v = newVal.trim();
+    if (!v) return;
+    onAddCustom(v);
+    setNewVal(''); setAdding(false);
+  };
+  return (
+    <div>
+      <label className="block text-xs text-gray-500 mb-0.5">
+        {label}{required && <span className="text-red-400 ml-0.5">*</span>}
+      </label>
+      <input type={type || 'text'} value={value} onChange={e => onChange(e.target.value)}
+        className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-orange-200 outline-none"
+        placeholder={placeholder} />
+      <div className="flex flex-wrap gap-1 mt-1">
+        {defaultItems.map(item => (
+          <button key={item} type="button" className="tmpl-btn"
+            onClick={() => onChange(String(item))}>{item}</button>
+        ))}
+        {(customItems || []).map((item, i) => (
+          <span key={i} className="inline-flex items-center">
+            <button type="button" className="tmpl-btn"
+              style={{background:'#eff6ff',borderColor:'#93c5fd',color:'#1d4ed8'}}
+              onClick={() => onChange(item)}>{item}</button>
+            <button type="button" onClick={() => onRemoveCustom(i)}
+              className="text-red-400 hover:text-red-600 text-xs ml-0.5 leading-none">×</button>
+          </span>
+        ))}
+        {adding ? (
+          <span className="inline-flex items-center gap-1">
+            <input type="text" value={newVal} onChange={e => setNewVal(e.target.value)}
+              onKeyDown={e => { if (e.key==='Enter') handleAdd(); if (e.key==='Escape') setAdding(false); }}
+              className="border rounded px-1.5 py-0.5 text-xs w-20 focus:ring-1 focus:ring-blue-300 outline-none"
+              autoFocus placeholder="値を入力" />
+            <button type="button" onClick={handleAdd}
+              className="text-xs text-green-600 hover:text-green-800 font-medium">追加</button>
+            <button type="button" onClick={() => { setAdding(false); setNewVal(''); }}
+              className="text-xs text-gray-400 hover:text-gray-600">×</button>
+          </span>
+        ) : (
+          <button type="button" onClick={() => setAdding(true)}
+            className="tmpl-btn border-dashed text-gray-400 hover:text-blue-500 hover:border-blue-400">＋</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Warnings({ warns, onClose }) {
+  if (!warns.length) return null;
+  return (
+    <div className="mb-3 p-3 bg-yellow-50 border border-yellow-300 rounded-lg">
+      {warns.map((w, i) => <div key={i} className="text-sm text-yellow-800">⚠ {w}</div>)}
+      <button className="text-xs text-gray-500 mt-1 underline" onClick={onClose}>閉じる</button>
+    </div>
+  );
+}
+
+function SavedToast({ show }) {
+  if (!show) return null;
+  return <span className="text-green-600 text-sm font-medium ml-3">✓ 保存しました</span>;
+}
+
+// ======================================================
+// PERSON SELECT MODAL
+// ======================================================
+function PersonSelectModal({ athletes, onConfirm }) {
+  const [step, setStep] = useState(1);
+  const [name, setName] = useState('');
+  const sortedAthletes = [...athletes].sort((a, b) => {
+    const yOrder = { '4年': 0, '3年': 1, '2年': 2, '1年': 3 };
+    if (yOrder[a.year] !== yOrder[b.year]) return (yOrder[a.year]??9) - (yOrder[b.year]??9);
+    return a.name.localeCompare(b.name, 'ja');
+  });
+  return (
+    <div className="modal-overlay">
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6 text-center">
+        <div className="text-4xl mb-3">🏃‍♀️</div>
+        <h2 className="text-lg font-bold text-gray-800 mb-5">女子駅伝部 練習記録</h2>
+        {step === 1 && (
+          <>
+            <p className="text-sm text-gray-500 mb-5">使用者を選択してください</p>
+            <div className="flex flex-col gap-3">
+              <button onClick={() => onConfirm('manager', null)}
+                className="w-full py-4 bg-blue-600 text-white text-base font-bold rounded-xl hover:bg-blue-700 transition-colors shadow-sm">
+                👑 マネージャー
+              </button>
+              <button onClick={() => setStep(2)}
+                className="w-full py-4 bg-green-600 text-white text-base font-bold rounded-xl hover:bg-green-700 transition-colors shadow-sm">
+                🏃 選手
+              </button>
+            </div>
+          </>
+        )}
+        {step === 2 && (
+          <>
+            <p className="text-sm text-gray-500 mb-4">あなたの名前を選択してください</p>
+            {sortedAthletes.length === 0 && (
+              <div className="mb-4 p-3 bg-yellow-50 border border-yellow-200 rounded-lg text-xs text-yellow-800 text-left">
+                ⚠ 選手情報を読み込み中です。<br/>
+                Google Sheetsとの連携設定が完了していない場合は、マネージャーとしてログインして設定を行ってください。
+              </div>
+            )}
+            <select value={name} onChange={e => setName(e.target.value)}
+              disabled={sortedAthletes.length === 0}
+              className="w-full border rounded-lg px-3 py-2 text-sm mb-4 focus:ring-2 focus:ring-green-300 outline-none disabled:opacity-50">
+              <option value="">{sortedAthletes.length === 0 ? '（選手情報なし）' : '選択してください'}</option>
+              {sortedAthletes.map(a => (
+                <option key={a.name} value={a.name}>{a.year} {a.name}</option>
+              ))}
+            </select>
+            <button onClick={() => { if (name) onConfirm('athlete', name); }} disabled={!name}
+              className="w-full py-3 bg-green-600 text-white font-bold rounded-xl hover:bg-green-700 disabled:opacity-40 transition-colors mb-2">
+              決定
+            </button>
+            <button onClick={() => setStep(1)}
+              className="w-full py-2 text-sm text-gray-400 hover:text-gray-600 transition-colors">
+              ← 戻る
+            </button>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// ADMIN PIN MODAL
+// ======================================================
+function AdminPinModal({ mode, savedPin, onSuccess, onClose }) {
+  const [pin, setPin]       = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [error, setError]   = useState('');
+  const handleSubmit = () => {
+    if (mode === 'set') {
+      if (pin.length < 4) { setError('4文字以上で設定してください'); return; }
+      if (pin !== confirm) { setError('PINが一致しません'); return; }
+      onSuccess(pin);
+    } else {
+      if (pin === savedPin) { onSuccess(null); }
+      else { setError('PINが違います'); setPin(''); }
+    }
+  };
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-xs p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-4">
+          🔒 {mode === 'set' ? '管理画面PINを設定' : '管理画面PIN入力'}
+        </h2>
+        <input type="password" value={pin} onChange={e => { setPin(e.target.value); setError(''); }}
+          onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+          placeholder={mode === 'set' ? '新しいPIN（4文字以上）' : 'PIN'}
+          className="w-full border rounded px-3 py-2 text-sm mb-2 focus:ring-2 focus:ring-blue-300 outline-none" />
+        {mode === 'set' && (
+          <input type="password" value={confirm} onChange={e => { setConfirm(e.target.value); setError(''); }}
+            onKeyDown={e => e.key === 'Enter' && handleSubmit()}
+            placeholder="PINを再入力"
+            className="w-full border rounded px-3 py-2 text-sm mb-2 focus:ring-2 focus:ring-blue-300 outline-none" />
+        )}
+        {error && <p className="text-xs text-red-600 mb-2">{error}</p>}
+        <div className="flex gap-2 mt-3">
+          <button onClick={onClose}
+            className="flex-1 py-2 text-sm text-gray-500 hover:text-gray-700">キャンセル</button>
+          <button onClick={handleSubmit}
+            className="flex-1 py-2 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700">
+            {mode === 'set' ? '設定' : '解除'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// UNENTERED BANNER
+// ======================================================
+function UnenteredBanner({ athletes, showOnly, onToggleFilter }) {
+  const [open, setOpen] = useState(true);
+  if (athletes.length === 0) return null;
+  return (
+    <div className="mb-3 border border-orange-200 rounded-lg bg-orange-50 overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2">
+        <button type="button" onClick={() => setOpen(p => !p)}
+          className="flex items-center gap-2 text-sm font-semibold text-orange-800">
+          <span>{open ? '▲' : '▼'}</span>
+          <span>未記入 {athletes.length}名</span>
+        </button>
+        <button type="button" onClick={onToggleFilter}
+          className={`px-3 py-1 text-xs rounded-full border transition-colors font-medium
+            ${showOnly ? 'bg-orange-600 text-white border-orange-600' : 'bg-white text-orange-600 border-orange-300 hover:bg-orange-50'}`}>
+          {showOnly ? '全員表示に戻す' : '未記入のみ表示'}
+        </button>
+      </div>
+      {open && (
+        <div className="px-3 pb-2 flex flex-wrap gap-1">
+          {athletes.map(a => (
+            <span key={a.name}
+              className="inline-block px-2 py-0.5 bg-white border border-orange-200 rounded text-xs text-orange-700">
+              {a.year} {a.name}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ======================================================
+// PDF CONFIRM MODAL
+// ======================================================
+function PdfConfirmModal({ date, sessions, onConfirm, onClose }) {
+  const [selectedSession, setSelectedSession] = useState(sessions[0] || '朝練習');
+  return (
+    <div className="modal-overlay" onClick={e => e.target === e.currentTarget && onClose()}>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+        <h2 className="text-base font-bold text-gray-800 mb-4">📄 PDF出力</h2>
+        {sessions.length > 1 && (
+          <div className="mb-4">
+            <label className="block text-xs text-gray-500 mb-1">セッション選択</label>
+            <select value={selectedSession} onChange={e => setSelectedSession(e.target.value)}
+              className="w-full border rounded px-2 py-2 text-sm focus:ring-2 focus:ring-blue-300 outline-none">
+              {sessions.map(s => <option key={s}>{s}</option>)}
+            </select>
+          </div>
+        )}
+        <p className="text-sm text-gray-700 mb-2">
+          <strong>{date}（{selectedSession}）</strong> の練習記録をPDFで出力しますか？
+        </p>
+        <p className="text-xs text-gray-400 mb-5">ファイル名: {date}_{selectedSession}.pdf</p>
+        <div className="flex gap-2 justify-end">
+          <button onClick={onClose}
+            className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700">キャンセル</button>
+          <button onClick={() => onConfirm(selectedSession)}
+            className="px-5 py-2 bg-blue-600 text-white text-sm font-bold rounded-lg hover:bg-blue-700 shadow-sm">
+            出力
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// COMMON SETTINGS
+// ======================================================
+function CommonSettings({ s, onChange, contentTags }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="bg-white border border-gray-200 rounded-lg mb-3 shadow-sm">
+      <button type="button" onClick={() => setOpen(!open)}
+        className="w-full flex items-center justify-between px-4 py-2.5 font-semibold text-sm text-gray-700 bg-gray-50 rounded-t-lg hover:bg-gray-100 transition-colors">
+        <span>共通設定</span>
+        <span className="text-gray-400 text-xs">{open ? '▲ 閉じる' : '▼ 開く'}</span>
+      </button>
+      {open && (
+        <div className="p-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">日付</span>
+            <input type="date" value={s.date} onChange={e => onChange('date', e.target.value)}
+              style={{background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', borderColor: 'rgba(0, 217, 255, 0.25)'}}
+              className="w-full border-2 rounded-lg px-2 py-1.5 text-sm focus:ring-2 outline-none" onFocus={e => e.target.style.boxShadow = '0 0 0 3px rgba(0, 217, 255, 0.2)'} onBlur={e => e.target.style.boxShadow = 'none'} />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">場所</span>
+            <input type="text" value={s.location} onChange={e => onChange('location', e.target.value)}
+              style={{background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', borderColor: 'rgba(0, 217, 255, 0.25)'}}
+              className="w-full border-2 rounded-lg px-2 py-1.5 text-sm focus:ring-2 outline-none" onFocus={e => e.target.style.boxShadow = '0 0 0 3px rgba(0, 217, 255, 0.2)'} onBlur={e => e.target.style.boxShadow = 'none'} />
+          </label>
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">セッション</span>
+            <select value={s.sessionName || '朝練習'} onChange={e => onChange('sessionName', e.target.value)}
+              style={{background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', borderColor: 'rgba(0, 217, 255, 0.25)'}}
+              className="w-full border-2 rounded-lg px-2 py-1.5 text-sm focus:ring-2 outline-none" onFocus={e => e.target.style.boxShadow = '0 0 0 3px rgba(0, 217, 255, 0.2)'} onBlur={e => e.target.style.boxShadow = 'none'}>
+              {SESSION_NAMES.map(n => <option key={n}>{n}</option>)}
+            </select>
+          </label>
+          <label className={`block ${!s.temperature && 'bg-orange-50 p-2 rounded border-2 border-orange-300'}`}>
+            <span className={`block text-xs mb-1 ${!s.temperature ? 'text-orange-600 font-semibold' : 'text-gray-500'}`}>気温 ℃</span>
+            <input type="number" value={s.temperature ?? ''} onChange={e => onChange('temperature', e.target.value)}
+              placeholder="—" style={{background: !s.temperature ? '' : 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', borderColor: !s.temperature ? '#f97316' : 'rgba(0, 217, 255, 0.25)', color: !s.temperature ? '' : '#00a8cc'}} className={`w-full border-2 rounded-lg px-2 py-1.5 text-sm outline-none font-semibold`} />
+          </label>
+          <label className={`block ${!s.humidity && 'bg-orange-50 p-2 rounded border-2 border-orange-300'}`}>
+            <span className={`block text-xs mb-1 ${!s.humidity ? 'text-orange-600 font-semibold' : 'text-gray-500'}`}>湿度 %</span>
+            <input type="number" value={s.humidity ?? ''} onChange={e => onChange('humidity', e.target.value)}
+              placeholder="—" style={{background: !s.humidity ? '' : 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', borderColor: !s.humidity ? '#f97316' : 'rgba(0, 217, 255, 0.25)', color: !s.humidity ? '' : '#00a8cc'}} className={`w-full border-2 rounded-lg px-2 py-1.5 text-sm outline-none font-semibold`} />
+          </label>
+          <label className={`block ${!s.wind && 'bg-orange-50 p-2 rounded border-2 border-orange-300'}`}>
+            <span className={`block text-xs mb-1 ${!s.wind ? 'text-orange-600 font-semibold' : 'text-gray-500'}`}>風</span>
+            <input type="text" value={s.wind ?? ''} onChange={e => onChange('wind', e.target.value)}
+              placeholder="例: 北 3m/s" style={{background: !s.wind ? '' : 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', borderColor: !s.wind ? '#f97316' : 'rgba(0, 217, 255, 0.25)', color: !s.wind ? '' : '#00a8cc'}} className={`w-full border-2 rounded-lg px-2 py-1.5 text-sm outline-none font-semibold`} />
+          </label>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ======================================================
+// JOG VIEW
+// ======================================================
+function JogView({ common, onSave, onSaveSessionMeta, athletes, contentTags, records, myName }) {
+  const [rows, setRows]           = useState([]);
+  const [yearFilter, setFilter]   = useState('全員');
+  const [warns, setWarns]         = useState([]);
+  const [saved, setSaved]         = useState(false);
+  const [prevValues, setPrevValues] = useLS('ekiden_prev_jog', {});
+  const [bulkKm, setBulkKm]       = useState('');
+  const [bulkMin, setBulkMin]     = useState('');
+  const [bulkContentTag, setBulkContentTag] = useState('');
+  const [bulkStatusDiv, setBulkStatusDiv] = useState('');
+  const [bulkNote, setBulkNote]   = useState('');
+  const [checkedNames, setCheckedNames] = useState(new Set());
+  const [showUnenteredOnly, setShowUnenteredOnly] = useState(false);
+
+  // checkedNames を日付変更時にリセット
+  useEffect(() => { setCheckedNames(new Set()); }, [common.s.date]);
+
+  // records への最新参照を保持（useEffect依存配列を増やさずに済む）
+  const recordsRef = useRef(records);
+  useEffect(() => { recordsRef.current = records; });
+
+  useEffect(() => {
+    const sorted = [...athletes].sort((a, b) => {
+      const yOrder = { '4年': 0, '3年': 1, '2年': 2, '1年': 3 };
+      if (yOrder[a.year] !== yOrder[b.year]) return yOrder[a.year] - yOrder[b.year];
+      return a.name.localeCompare(b.name, 'ja');
+    });
+    // 選手ごとの最新 statusDiv を records から取得（故障者を赤表示するため）
+    const latestStatus = {};
+    (recordsRef.current || []).forEach(r => {
+      if (r.statusDiv && (!latestStatus[r.name] || r.date > latestStatus[r.name].date)) {
+        latestStatus[r.name] = { date: r.date, statusDiv: r.statusDiv };
+      }
+    });
+    setRows(sorted.map(a => ({
+      name: a.name,
+      year: a.year,
+      distanceKm: '',
+      durationMin: '',
+      contentTag: prevValues.contentTag || (contentTags[0] || ''),
+      statusDiv: latestStatus[a.name]?.statusDiv || '通常',
+      note: ''
+    })));
+  }, [athletes, contentTags]);
+
+  // 未記入選手の計算
+  const enteredNames = new Set(
+    (records || []).filter(r => r.date === common.s.date).map(r => r.name)
+  );
+  const unenteredAthletes = athletes.filter(a => !enteredNames.has(a.name));
+  const hasExistingRecords = enteredNames.size > 0;
+
+  // 表示選手のフィルタリング
+  const displayed = (() => {
+    let base = yearFilter === '全員' ? rows : rows.filter(r => r.year === yearFilter);
+    if (myName) base = base.filter(r => r.name === myName);
+    else if (showUnenteredOnly) base = base.filter(r => !enteredNames.has(r.name));
+    return base;
+  })();
+
+  // チェックボックス操作
+  const allChecked = displayed.length > 0 && displayed.every(r => checkedNames.has(r.name));
+  const toggleAll = () => {
+    if (allChecked) {
+      setCheckedNames(prev => { const s = new Set(prev); displayed.forEach(r => s.delete(r.name)); return s; });
+    } else {
+      setCheckedNames(prev => { const s = new Set(prev); displayed.forEach(r => s.add(r.name)); return s; });
+    }
+  };
+  const toggleOne = (name) => {
+    setCheckedNames(prev => { const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s; });
+  };
+
+  const update = (name, field, val) =>
+    setRows(prev => prev.map(r => r.name === name ? { ...r, [field]: val } : r));
+
+  // 機能4: 前日コピー
+  const handlePrevDayCopy = () => {
+    const currentDate = common.s.date;
+    const prevDate = new Date(new Date(currentDate).getTime() - 86400000).toISOString().slice(0, 10);
+    const prevRecs = (records || []).filter(r => r.date === prevDate && r.practiceType === 'ジョグ・各自');
+    if (prevRecs.length === 0) {
+      alert('前日の記録が見つかりません');
+      return;
+    }
+    setRows(prev => prev.map(r => {
+      const found = prevRecs.find(p => p.name === r.name);
+      if (found) {
+        return { ...r,
+          distanceKm: found.distanceKm !== '' && found.distanceKm !== undefined ? String(found.distanceKm) : r.distanceKm,
+          durationMin: found.durationMin !== '' && found.durationMin !== undefined ? String(found.durationMin) : r.durationMin,
+          contentTag: found.contentTag || r.contentTag,
+        };
+      }
+      return r;
+    }));
+  };
+
+  // 機能5: 一括入力（チェックボックスで選択した選手のみ）
+  const handleBulkApply = () => {
+    if (bulkKm === '' && bulkMin === '' && bulkContentTag === '' && bulkStatusDiv === '' && bulkNote === '') return;
+    if (checkedNames.size === 0) return;
+    setRows(prev => prev.map(r => {
+      if (!checkedNames.has(r.name)) return r;
+      return {
+        ...r,
+        ...(bulkKm !== '' ? { distanceKm: bulkKm } : {}),
+        ...(bulkMin !== '' ? { durationMin: bulkMin } : {}),
+        ...(bulkContentTag !== '' ? { contentTag: bulkContentTag } : {}),
+        ...(bulkStatusDiv !== '' ? { statusDiv: bulkStatusDiv } : {}),
+        ...(bulkNote !== '' ? { note: bulkNote } : {}),
+      };
+    }));
+    setCheckedNames(new Set());
+    setBulkKm('');
+    setBulkMin('');
+    setBulkContentTag('');
+    setBulkStatusDiv('');
+    setBulkNote('');
+  };
+
+  const handleSave = () => {
+    const w = [];
+    const dateMs = new Date(common.s.date).getTime();
+    const nowMs  = Date.now();
+    if (dateMs > nowMs + 30 * 86400000)  w.push('日付が30日以上未来です。確認してください。');
+    if (dateMs < nowMs - 365 * 86400000) w.push('日付が1年以上前です。確認してください。');
+
+    const filled = rows.filter(r => r.distanceKm !== '' || r.durationMin !== '');
+    filled.forEach(r => {
+      if (r.distanceKm !== '' && parseFloat(r.distanceKm) > 50)
+        w.push(`${r.name}: 距離が50kmを超えています。`);
+    });
+
+    const toSave = rows.filter(r => r.distanceKm !== '' || r.durationMin !== '' || r.note !== '');
+    if (toSave.length === 0) {
+      setWarns(['入力された行がありません（距離・時間・備考のいずれかを入力してください）。']);
+      return;
+    }
+    setWarns(w);
+    const recs = toSave.map(r => ({
+      id: uid(), date: common.s.date, name: r.name, year: r.year,
+      statusDiv: r.statusDiv, practiceType: 'ジョグ・各自', sessionType: '',
+      location: common.s.location,
+      sessionName: common.s.sessionName || '朝練習',
+      distanceKm: r.distanceKm !== '' ? parseFloat(r.distanceKm) : '',
+      durationMin: r.durationMin !== '' ? parseInt(r.durationMin) : '',
+      contentTag: r.contentTag,
+      displayMenu: buildJogMenu(r.contentTag, r.distanceKm, r.durationMin),
+      note: r.note,
+      blockNo: '', distanceM: '', reps: '', sets: '', target: '',
+      restBetweenReps: '', restBetweenSets: '', pointDistanceKm: '', sessionMenu: '',
+    }));
+    // セッションメタデータを保存
+    if (onSaveSessionMeta) {
+      onSaveSessionMeta(common.s.date, common.s.sessionName || '朝練習', {
+        temperature: common.s.temperature, humidity: common.s.humidity,
+        wind: common.s.wind, location: common.s.location,
+      });
+    }
+    setPrevValues({ contentTag: toSave[0]?.contentTag || '', statusDiv: toSave[0]?.statusDiv || '通常' });
+    onSave(recs);
+    setPrevValues({ contentTag: toSave[0]?.contentTag || '' });
+    setSaved(true);
+    setRows(rows.map(r => ({ ...r, distanceKm: '', durationMin: '', note: '' })));
+    setTimeout(() => setSaved(false), 3000);
+  };
+
+  return (
+    <div>
+      <CommonSettings s={common.s} onChange={common.onChange} contentTags={contentTags} />
+
+      {!myName && (
+        <div className="flex flex-wrap gap-2 mb-3 items-center">
+          <span className="text-xs text-gray-500 font-medium">表示絞込:</span>
+          {['全員', ...YEARS].map(y => (
+            <button key={y} type="button" onClick={() => setFilter(y)}
+              className={`px-3 py-1 text-xs rounded-full border transition-colors font-medium
+                ${yearFilter === y ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
+              {y}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <Warnings warns={warns} onClose={() => setWarns([])} />
+
+      {/* 未記入バナー（マネージャーモードのみ） */}
+      {!myName && hasExistingRecords && (
+        <UnenteredBanner
+          athletes={unenteredAthletes}
+          showOnly={showUnenteredOnly}
+          onToggleFilter={() => setShowUnenteredOnly(p => !p)}
+        />
+      )}
+
+      {/* 一括入力エリア（チェックボックス方式） */}
+      {!myName && (
+        <div className="mb-3 p-3 bg-blue-50 border border-blue-100 rounded-lg space-y-2">
+          <div className="flex flex-wrap gap-2 items-center">
+            <span className="text-xs font-semibold text-gray-700">一括入力:</span>
+            <input type="number" step="0.1" min="0" value={bulkKm} onChange={e => setBulkKm(e.target.value)}
+              placeholder="距離 km" style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}} className="w-24 border-2 rounded px-2 py-1 text-sm font-semibold outline-none" />
+            <input type="number" step="1" min="0" value={bulkMin} onChange={e => setBulkMin(e.target.value)}
+              placeholder="時間 分" style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}} className="w-24 border-2 rounded px-2 py-1 text-sm font-semibold outline-none" />
+            <select value={bulkContentTag} onChange={e => setBulkContentTag(e.target.value)}
+              style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#1f2937'}} className="border-2 rounded px-2 py-1 text-xs outline-none">
+              <option value="">タグ選択（変更なし）</option>
+              {contentTags.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value={bulkStatusDiv} onChange={e => setBulkStatusDiv(e.target.value)}
+              style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#1f2937'}} className="border-2 rounded px-2 py-1 text-xs outline-none">
+              <option value="">状態区分（変更なし）</option>
+              {STATUS_DIVS.map(s => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <input type="text" value={bulkNote} onChange={e => setBulkNote(e.target.value)}
+              placeholder="備考" style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}} className="flex-1 min-w-[150px] border-2 rounded px-2 py-1 text-sm font-semibold outline-none" />
+          </div>
+          <div className="flex flex-wrap gap-2 items-center">
+            <button type="button" onClick={handleBulkApply}
+              disabled={checkedNames.size === 0}
+              style={{background: 'linear-gradient(135deg, #a52a2a 0%, #8b3a3a 100%)', boxShadow: '0 4px 12px rgba(165, 42, 42, 0.2)'}}
+              className="px-3 py-1 text-white text-xs rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity font-semibold">
+              選択した{checkedNames.size}人に適用
+            </button>
+            {checkedNames.size > 0 && (
+              <button type="button" onClick={() => setCheckedNames(new Set())}
+                className="px-3 py-1 bg-gray-400 text-white text-xs rounded-lg hover:bg-gray-500 transition-colors font-semibold">
+                🔲 選択解除
+              </button>
+            )}
+            <span className="text-xs text-gray-600">（チェックした選手のみ・入力した項目のみ反映）</span>
+          </div>
+        </div>
+      )}
+
+      {/* PC用テーブル */}
+      <div className="hidden md:block overflow-x-auto rounded-lg border border-gray-200 shadow-sm bg-white">
+        <table className="w-full text-sm min-w-[600px]">
+          <thead style={{background: 'linear-gradient(135deg, #faf5f5 0%, #f5f0f0 100%)', borderBottomColor: 'rgba(0, 217, 255, 0.2)'}} className="border-b-2">
+            <tr>
+              {!myName && (
+                <th className="px-3 py-2.5 text-center text-xs text-gray-500 font-semibold w-8">
+                  <input type="checkbox" checked={allChecked} onChange={toggleAll}
+                    className="w-3 h-3" style={{accentColor: '#a52a2a'}} title="全選択/解除" />
+                </th>
+              )}
+              <th className="px-3 py-2.5 text-left text-xs font-semibold w-24" style={{color: '#a52a2a'}}>選手名</th>
+              <th className="px-2 py-2.5 text-center text-xs font-semibold w-20" style={{color: '#a52a2a'}}>距離 km</th>
+              <th className="px-2 py-2.5 text-center text-xs font-semibold w-20" style={{color: '#a52a2a'}}>時間 分</th>
+              <th className="px-2 py-2.5 text-center text-xs font-semibold w-24" style={{color: '#a52a2a'}}>内容タグ</th>
+              <th className="px-2 py-2.5 text-center text-xs font-semibold w-20" style={{color: '#a52a2a'}}>状態区分</th>
+              <th className="px-2 py-2.5 text-left text-xs font-semibold" style={{color: '#a52a2a'}}>備考</th>
+            </tr>
+          </thead>
+          <tbody>
+            {displayed.map((row, i) => (
+              <tr key={row.name} className={
+                checkedNames.has(row.name)
+                  ? 'bg-cyan-50 border-l-4 border-cyan-400'
+                  : (row.statusDiv === '故障'
+                      ? 'bg-red-50'
+                      : (i % 2 === 0 ? 'bg-white' : 'bg-gray-50/40'))
+              }>
+                {!myName && (
+                  <td className="px-3 py-1.5 text-center">
+                    <input type="checkbox" checked={checkedNames.has(row.name)} onChange={() => toggleOne(row.name)}
+                      className="w-3 h-3 accent-blue-600" />
+                  </td>
+                )}
+                <td className="px-3 py-1.5">
+                  <span className={`font-medium text-xs block leading-tight ${row.statusDiv === '故障' ? 'text-red-600 font-bold' : 'text-gray-800'}`}>{row.name}</span>
+                  <span className="text-xs text-gray-400">{row.year}</span>
+                </td>
+                <td className="px-2 py-1.5">
+                  <input type="number" step="0.1" min="0" value={row.distanceKm}
+                    onChange={e => update(row.name, 'distanceKm', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}}
+                    className="w-full border-2 rounded px-2 py-1 text-sm text-right font-semibold focus:ring-2 outline-none"
+                    placeholder="—" />
+                </td>
+                <td className="px-2 py-1.5">
+                  <input type="number" step="1" min="0" value={row.durationMin}
+                    onChange={e => update(row.name, 'durationMin', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}}
+                    className="w-full border-2 rounded px-2 py-1 text-sm text-right font-semibold focus:ring-2 outline-none"
+                    placeholder="—" />
+                </td>
+                <td className="px-2 py-1.5">
+                  <select value={row.contentTag} onChange={e => update(row.name, 'contentTag', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#1f2937'}}
+                    className="w-full border-2 rounded px-1 py-1 text-xs focus:ring-2 outline-none">
+                    {contentTags.map(t => <option key={t}>{t}</option>)}
+                  </select>
+                </td>
+                <td className="px-2 py-1.5">
+                  <select value={row.statusDiv} onChange={e => update(row.name, 'statusDiv', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#1f2937'}}
+                    className="w-full border-2 rounded px-1 py-1 text-xs focus:ring-2 outline-none">
+                    {STATUS_DIVS.map(s => <option key={s}>{s}</option>)}
+                  </select>
+                </td>
+                <td className="px-2 py-1.5">
+                  <input type="text" value={row.note}
+                    onChange={e => update(row.name, 'note', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}}
+                    className="w-full border-2 rounded px-2 py-1 text-sm focus:ring-2 outline-none font-semibold"
+                    placeholder="（任意）" />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* iPhone用カード形式 */}
+      <div className="md:hidden space-y-3">
+        {displayed.map((row, i) => (
+          <div key={row.name} className={`p-3 rounded-lg border-2 ${checkedNames.has(row.name) ? 'bg-cyan-50 border-cyan-400' : (row.statusDiv === '故障' ? 'bg-red-50 border-red-200' : 'bg-white border-gray-200')} shadow-sm`}>
+            <div className="flex items-start gap-2 mb-3">
+              {!myName && (
+                <input type="checkbox" checked={checkedNames.has(row.name)} onChange={() => toggleOne(row.name)}
+                  className="w-4 h-4 mt-0.5" style={{accentColor: '#a52a2a'}} />
+              )}
+              <div className="flex-1">
+                <div className={`font-bold text-sm ${row.statusDiv === '故障' ? 'text-red-600' : 'text-gray-800'}`}>{row.name}</div>
+                <div className="text-xs text-gray-500">{row.year}</div>
+              </div>
+            </div>
+
+            <div className="space-y-2">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-gray-600 font-semibold block mb-1">距離 km</label>
+                  <input type="number" step="0.1" min="0" value={row.distanceKm}
+                    onChange={e => update(row.name, 'distanceKm', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}}
+                    className="w-full border-2 rounded px-2 py-1.5 text-sm text-center font-semibold focus:ring-2 outline-none"
+                    placeholder="—" />
+                </div>
+                <div>
+                  <label className="text-xs text-gray-600 font-semibold block mb-1">時間 分</label>
+                  <input type="number" step="1" min="0" value={row.durationMin}
+                    onChange={e => update(row.name, 'durationMin', e.target.value)}
+                    style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}}
+                    className="w-full border-2 rounded px-2 py-1.5 text-sm text-center font-semibold focus:ring-2 outline-none"
+                    placeholder="—" />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs text-gray-600 font-semibold block mb-1">内容タグ</label>
+                <select value={row.contentTag} onChange={e => update(row.name, 'contentTag', e.target.value)}
+                  style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#1f2937'}}
+                  className="w-full border-2 rounded px-2 py-1.5 text-xs focus:ring-2 outline-none">
+                  {contentTags.map(t => <option key={t}>{t}</option>)}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs text-gray-600 font-semibold block mb-1">状態区分</label>
+                <select value={row.statusDiv} onChange={e => update(row.name, 'statusDiv', e.target.value)}
+                  style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#1f2937'}}
+                  className="w-full border-2 rounded px-2 py-1.5 text-xs focus:ring-2 outline-none">
+                  {STATUS_DIVS.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs text-gray-600 font-semibold block mb-1">備考</label>
+                <input type="text" value={row.note}
+                  onChange={e => update(row.name, 'note', e.target.value)}
+                  style={{borderColor: 'rgba(0, 217, 255, 0.25)', background: 'linear-gradient(135deg, #f8feff 0%, #f0f9ff 100%)', color: '#00a8cc'}}
+                  className="w-full border-2 rounded px-2 py-1.5 text-sm focus:ring-2 outline-none font-semibold"
+                  placeholder="（任意）" />
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+
+      <div className="mt-4 flex items-center gap-3 flex-wrap">
+        <button type="button" onClick={handleSave}
+          style={{background: 'linear-gradient(135deg, #a52a2a 0%, #8b3a3a 100%)', boxShadow: '0 6px 20px rgba(165, 42, 42, 0.25)'}}
+          className="px-6 py-2.5 text-white rounded-lg font-semibold text-sm hover:opacity-90 active:opacity-80 transition-all shadow-lg">
+          保存（入力済みのみ）
+        </button>
+        {/* 機能4: 前日コピーボタン */}
+        <button type="button" onClick={handlePrevDayCopy}
+          className="px-4 py-2.5 bg-white text-gray-700 rounded-lg font-semibold text-sm hover:bg-gray-50 active:bg-gray-100 transition-colors shadow-sm border-2"
+          style={{borderColor: 'rgba(165, 42, 42, 0.3)'}}>
+          前日コピー
+        </button>
+        <SavedToast show={saved} />
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// BLOCK CARD (Point Practice)
+// ======================================================
+function BlockCard({ block, idx, total, onChange, onDelete, ct, onAddCt, onRemoveCt }) {
+  const set = (field, val) => onChange(block.id, field, val);
+  const preview = buildPointMenu(block);
+  const km = calcPointKm(block.distanceM, block.reps, block.sets);
+
+  return (
+    <div className="border border-gray-200 rounded-xl p-3 bg-white shadow-sm mb-3">
+      <div className="flex items-center justify-between mb-2">
+        <span className="text-xs font-bold text-gray-500 uppercase tracking-wide">ブロック {idx + 1}</span>
+        <div className="flex items-center gap-2">
+          {km > 0 && <span className="text-xs text-blue-600 font-medium bg-blue-50 px-2 py-0.5 rounded-full">{km} km</span>}
+          {total > 1 && (
+            <button type="button" onClick={() => onDelete(block.id)}
+              className="text-red-400 hover:text-red-600 text-base leading-none w-6 h-6 flex items-center justify-center rounded hover:bg-red-50 transition-colors">
+              ×
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-2 mb-2">
+        <CustomTmplField label="距離 m" required type="number"
+          value={block.distanceM} onChange={v => set('distanceM', v)} placeholder="1000"
+          defaultItems={TMPL_DIST} customItems={ct.dist}
+          onAddCustom={v => onAddCt('dist', v)} onRemoveCustom={i => onRemoveCt('dist', i)} />
+        <CustomTmplField label="本数" required type="number"
+          value={block.reps} onChange={v => set('reps', v)} placeholder="5"
+          defaultItems={TMPL_REPS} customItems={ct.reps}
+          onAddCustom={v => onAddCt('reps', v)} onRemoveCustom={i => onRemoveCt('reps', i)} />
+        <CustomTmplField label="セット数" type="number"
+          value={block.sets} onChange={v => set('sets', v)} placeholder="1"
+          defaultItems={TMPL_SETS} customItems={ct.sets}
+          onAddCustom={v => onAddCt('sets', v)} onRemoveCustom={i => onRemoveCt('sets', i)} />
+      </div>
+
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3 mb-2">
+        <CustomTmplField label="設定"
+          value={block.target} onChange={v => set('target', v)} placeholder="3'10&quot;"
+          defaultItems={TMPL_TARGET} customItems={ct.target}
+          onAddCustom={v => onAddCt('target', v)} onRemoveCustom={i => onRemoveCt('target', i)} />
+        <CustomTmplField label="本数間レスト"
+          value={block.restBetweenReps} onChange={v => set('restBetweenReps', v)} placeholder="R=2'00&quot;"
+          defaultItems={TMPL_REST_REPS} customItems={ct.restReps}
+          onAddCustom={v => onAddCt('restReps', v)} onRemoveCustom={i => onRemoveCt('restReps', i)} />
+        <CustomTmplField label="セット間レスト"
+          value={block.restBetweenSets} onChange={v => set('restBetweenSets', v === '(空欄)' ? '' : v)} placeholder="（任意）"
+          defaultItems={TMPL_REST_SETS} customItems={ct.restSets}
+          onAddCustom={v => onAddCt('restSets', v)} onRemoveCustom={i => onRemoveCt('restSets', i)} />
+      </div>
+
+      <div>
+        <label className="block text-xs text-gray-500 mb-0.5">備考</label>
+        <input type="text" value={block.note} onChange={e => set('note', e.target.value)}
+          className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-orange-200 outline-none" placeholder="（任意）" />
+      </div>
+
+      {preview !== '(未入力)' && (
+        <div className="mt-2.5 px-3 py-1.5 bg-orange-50 border border-orange-200 rounded-lg text-xs text-orange-800 font-mono">
+          → {preview}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ======================================================
+// POINT VIEW
+// ======================================================
+const EMPTY_CT = { dist:[], reps:[], sets:[], target:[], restReps:[], restSets:[] };
+
+function PointView({ common, onSave, onSaveSessionMeta, templates, onSaveTemplate, onUpdateTemplate, onDeleteTemplate, athletes, contentTags }) {
+  const [sessionType, setSessionType] = useState('トラック');
+  const [blocks, setBlocks]           = useState([newBlock(1)]);
+  const [sessionMenu, setSessionMenu] = useState('');
+  const [sessionNote, setSessionNote] = useState('');
+  const [selected, setSelected]       = useState(new Set());
+  const [menus, setMenus]             = useState({});
+  const [warns, setWarns]             = useState([]);
+  const [saved, setSaved]             = useState(false);
+  const [tmplName, setTmplName]       = useState('');
+  const [showTmpl, setShowTmpl]       = useState(false);
+  const [loadedTmplIdx, setLoadedTmplIdx] = useState(null);
+  const [ct, setCt]                   = useLS('ekiden_custom_tmpl', EMPTY_CT);
+  const [menuHistory, setMenuHistory] = useLS('ekiden_session_menu_history', []);
+  const [noteHistory, setNoteHistory] = useLS('ekiden_session_note_history', []);
+
+  const addCt    = (field, v) => setCt(p => ({ ...p, [field]: [...(p[field]||[]), v] }));
+  const removeCt = (field, i) => setCt(p => ({ ...p, [field]: p[field].filter((_,j) => j!==i) }));
+
+  const updateBlock = (id, field, val) =>
+    setBlocks(bs => bs.map(b => b.id === id ? { ...b, [field]: val } : b));
+  const deleteBlock = id => setBlocks(bs => bs.filter(b => b.id !== id));
+  const addBlock    = () => setBlocks(bs => [...bs, newBlock(bs.length + 1)]);
+
+  const autoGenMenu = () => setSessionMenu(buildSessionMenu(blocks));
+
+  const toggle = name => setSelected(prev => {
+    const s = new Set(prev); s.has(name) ? s.delete(name) : s.add(name); return s;
+  });
+  const selectYear = y => {
+    const names = athletes.filter(a => a.year === y).map(a => a.name);
+    setSelected(prev => { const s = new Set(prev); names.forEach(n => s.add(n)); return s; });
+  };
+
+  const validateBlocks = () => {
+    const w = [];
+    blocks.forEach((b, i) => {
+      if (!b.distanceM) w.push(`ブロック${i+1}: 距離mが未入力です`);
+      if (!b.reps)      w.push(`ブロック${i+1}: 本数が未入力です`);
+      if (parseInt(b.sets) === 0) w.push(`ブロック${i+1}: セット数は1以上にしてください`);
+    });
+    return w;
+  };
+
+  const addToAthletes = () => {
+    if (selected.size === 0) { setWarns(['選手を1人以上選択してください。']); return; }
+    const w = validateBlocks();
+    const dups = [];
+    const next = { ...menus };
+    selected.forEach(name => {
+      const entry = next[name] ? { ...next[name], blocks: [...next[name].blocks] }
+                               : { sessionMenu, blocks: [], statusDiv: '通常' };
+      entry.sessionMenu = sessionMenu;
+      blocks.forEach(b => {
+        const preview = buildPointMenu(b);
+        if (entry.blocks.some(x => buildPointMenu(x) === preview)) {
+          dups.push(`${name}に「${preview}」が既に登録されています`);
+        } else {
+          entry.blocks.push({ ...b, id: uid() });
+        }
+      });
+      next[name] = entry;
+    });
+    setMenus(next);
+    setWarns([...w, ...dups]);
+    if (w.length === 0 && dups.length === 0) setSelected(new Set());
+  };
+
+  const deleteMenuBlock = (name, id) => {
+    setMenus(prev => {
+      const n = { ...prev };
+      n[name] = { ...n[name], blocks: n[name].blocks.filter(b => b.id !== id) };
+      if (!n[name].blocks.length) delete n[name];
+      return n;
+    });
+  };
+  const clearAthleteMenu = name => setMenus(prev => { const n={...prev}; delete n[name]; return n; });
+
+  const handleSave = () => {
+    const athletes_list = Object.keys(menus);
+    if (!athletes_list.length) { setWarns(['登録済みメニューがありません。']); return; }
+    const w = [];
+    const dateMs = new Date(common.s.date).getTime(), nowMs = Date.now();
+    if (dateMs > nowMs + 30*86400000)  w.push('日付が30日以上未来です。確認してください。');
+    if (dateMs < nowMs - 365*86400000) w.push('日付が1年以上前です。確認してください。');
+    const recs = [];
+    athletes_list.forEach(name => {
+      const ath = athletes.find(a => a.name === name);
+      const { sessionMenu: sm, blocks: bs, statusDiv: sd } = menus[name];
+      bs.forEach((b, i) => {
+        recs.push({
+          id: uid(), date: common.s.date, name, year: ath?.year || '', division: '',
+          statusDiv: sd || '通常', practiceType: 'ポイント練習', sessionType,
+          location: common.s.location, sessionName: common.s.sessionName || '朝練習', blockNo: i + 1,
+          distanceM: b.distanceM !== '' ? parseInt(b.distanceM) : '',
+          reps:      b.reps !== '' ? parseInt(b.reps) : '',
+          sets:      parseInt(b.sets) || 1,
+          target: b.target, restBetweenReps: b.restBetweenReps, restBetweenSets: b.restBetweenSets,
+          pointDistanceKm: calcPointKm(b.distanceM, b.reps, b.sets),
+          sessionMenu: sm, displayMenu: buildPointMenu(b), note: b.note,
+          contentTag: '', distanceKm: '', durationMin: '',
+        });
+      });
+    });
+    setWarns(w);
+    // セッションメタデータを保存
+    if (onSaveSessionMeta) {
+      onSaveSessionMeta(common.s.date, common.s.sessionName || '朝練習', {
+        temperature: common.s.temperature, humidity: common.s.humidity,
+        wind: common.s.wind, location: common.s.location,
+        sessionNote: sessionNote,
+      });
+    }
+    onSave(recs);
+    // sessionMenuを履歴に追加（重複除去・最大15件）
+    if (sessionMenu.trim()) {
+      setMenuHistory(prev => {
+        const filtered = prev.filter(v => v !== sessionMenu.trim());
+        return [sessionMenu.trim(), ...filtered].slice(0, 15);
+      });
+    }
+    // sessionNoteを履歴に追加（重複除去・最大10件）
+    if (sessionNote.trim()) {
+      setNoteHistory(prev => {
+        const filtered = prev.filter(v => v !== sessionNote.trim());
+        return [sessionNote.trim(), ...filtered].slice(0, 10);
+      });
+    }
+    setSaved(true);
+    setMenus({}); setBlocks([newBlock(1)]); setSessionMenu(''); setSessionNote('');
+    setSelected(new Set()); setLoadedTmplIdx(null);
+    setTimeout(() => setSaved(false), 3000);
+  };
+
+  const handleSaveTemplate = () => {
+    if (!tmplName.trim()) return;
+    const tmpl = {
+      name: tmplName.trim(), sessionMenu,
+      blocks: blocks.map((b, i) => ({ ...b, id: uid(), blockNo: i+1 }))
+    };
+    const existIdx = templates.findIndex(t => t.name === tmplName.trim());
+    if (existIdx >= 0) {
+      onUpdateTemplate(existIdx, tmpl);
+    } else {
+      onSaveTemplate(tmpl);
+    }
+    setTmplName(''); setShowTmpl(false); setLoadedTmplIdx(null);
+  };
+
+  const loadTemplate = (t, idx) => {
+    setBlocks(t.blocks.map((b, j) => ({ ...b, id: uid(), blockNo: j+1 })));
+    setSessionMenu(t.sessionMenu || '');
+    setTmplName(t.name);
+    setLoadedTmplIdx(idx);
+    setShowTmpl(false);
+  };
+
+  const registeredNames = Object.keys(menus);
+  const totalKm = registeredNames.length > 0
+    ? (() => {
+        const allBlocks = Object.values(menus).flatMap(e => e.blocks);
+        const sum = allBlocks.reduce((a, b) => a + calcPointKm(b.distanceM, b.reps, b.sets), 0);
+        return Math.round(sum * 10) / 10;
+      })() : 0;
+
+  return (
+    <div>
+      <CommonSettings s={common.s} onChange={common.onChange} contentTags={contentTags} />
+
+      <div className="mb-3 bg-white border border-gray-200 rounded-lg p-3">
+        <label className="block text-xs text-gray-500 mb-2 font-semibold">実施タイプ</label>
+        <div className="flex gap-2 flex-wrap">
+          {SESSION_TYPES.map(t => (
+            <button key={t} type="button" onClick={() => setSessionType(t)}
+              className={`px-4 py-1.5 rounded-full text-sm border font-medium transition-colors
+                ${sessionType === t ? 'bg-orange-500 text-white border-orange-500 shadow-sm' : 'bg-white text-gray-600 border-gray-300 hover:bg-orange-50'}`}>
+              {t}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <Warnings warns={warns} onClose={() => setWarns([])} />
+
+      {templates.length > 0 && (
+        <div className="mb-3 p-3 bg-purple-50 border border-purple-200 rounded-lg">
+          <div className="text-xs font-bold text-purple-700 mb-2">📌 保存済みテンプレート</div>
+          <div className="space-y-1">
+            {templates.map((t, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <button type="button" onClick={() => loadTemplate(t, i)}
+                  className={`flex-1 text-left px-3 py-1.5 text-xs rounded-lg border font-medium transition-colors
+                    ${loadedTmplIdx === i ? 'bg-purple-200 border-purple-400 text-purple-900' : 'bg-white border-purple-300 text-purple-700 hover:bg-purple-100'}`}>
+                  {t.name}
+                  {t.sessionMenu && <span className="ml-1.5 text-purple-400 font-normal">{t.sessionMenu}</span>}
+                </button>
+                <button type="button" onClick={() => onDeleteTemplate(i)}
+                  className="text-xs text-red-400 hover:text-red-600 px-1.5 py-1 rounded hover:bg-red-50 transition-colors flex-shrink-0">
+                  削除
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div className="mb-3 bg-white border border-orange-200 rounded-xl p-3">
+        <div className="flex items-center justify-between mb-1.5">
+          <label className="text-xs font-bold text-gray-700">セッション表示名</label>
+          <button type="button" onClick={autoGenMenu}
+            className="text-xs text-blue-500 hover:text-blue-700 transition-colors">
+            ブロックから自動生成 ↑
+          </button>
+        </div>
+        <input type="text" value={sessionMenu} onChange={e => setSessionMenu(e.target.value)}
+          placeholder="例: 1000m×5本+200m×5本  /  3000m変化走+2000m変化走+1000m  /  (400m+800m)×3セット"
+          className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-200 outline-none" />
+        {menuHistory.length > 0 && (
+          <div className="mt-2">
+            <div className="text-xs text-gray-400 mb-1">🕐 履歴から選択：</div>
+            <div className="flex flex-wrap gap-1">
+              {menuHistory.map((h, i) => (
+                <span key={i} className="inline-flex items-center">
+                  <button type="button"
+                    onClick={() => setSessionMenu(h)}
+                    className="tmpl-btn"
+                    style={{background:'#fff7ed',borderColor:'#fed7aa',color:'#9a3412'}}>
+                    {h}
+                  </button>
+                  <button type="button"
+                    onClick={() => setMenuHistory(prev => prev.filter((_, j) => j !== i))}
+                    className="text-red-400 hover:text-red-600 text-xs ml-0.5 leading-none">×</button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+        <p className="text-xs text-gray-400 mt-1">記録一覧・Sheetsに「セッション表示名」列として保存されます</p>
+      </div>
+
+      <div className="mb-3 bg-white border border-orange-200 rounded-xl p-3">
+        <label className="block">
+          <span className="block text-xs font-bold text-gray-700 mb-1">セッション備考（任意）</span>
+          <textarea value={sessionNote} onChange={e => setSessionNote(e.target.value)}
+            placeholder="例: 強度高め、天気注意など"
+            rows="2"
+            className="w-full border rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-orange-200 outline-none" />
+        </label>
+        {noteHistory.length > 0 && (
+          <div className="mt-2">
+            <div className="text-xs text-gray-400 mb-1">🕐 履歴から選択：</div>
+            <div className="flex flex-wrap gap-1">
+              {noteHistory.map((h, i) => (
+                <span key={i} className="inline-flex items-center">
+                  <button type="button"
+                    onClick={() => setSessionNote(h)}
+                    className="tmpl-btn"
+                    style={{background:'#fef3c7',borderColor:'#fcd34d',color:'#92400e'}}>
+                    {h.length > 20 ? h.substring(0, 20) + '...' : h}
+                  </button>
+                  <button type="button"
+                    onClick={() => setNoteHistory(prev => prev.filter((_, j) => j !== i))}
+                    className="text-red-400 hover:text-red-600 text-xs ml-0.5 leading-none">×</button>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="mb-1">
+        <div className="flex items-center justify-between mb-2">
+          <h3 className="text-sm font-bold text-gray-700">メニューブロック</h3>
+          <span className="text-xs text-gray-400">{blocks.length} ブロック</span>
+        </div>
+        {blocks.map((b, i) => (
+          <BlockCard key={b.id} block={b} idx={i} total={blocks.length}
+            onChange={updateBlock} onDelete={deleteBlock}
+            ct={ct} onAddCt={addCt} onRemoveCt={removeCt} />
+        ))}
+        <button type="button" onClick={addBlock}
+          className="w-full py-2.5 border-2 border-dashed border-gray-300 rounded-xl text-sm text-gray-500 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50/30 transition-colors">
+          ＋ ブロック追加
+        </button>
+      </div>
+
+      <div className="mt-2 mb-5">
+        {!showTmpl ? (
+          <div className="flex items-center gap-3">
+            <button type="button" onClick={() => setShowTmpl(true)}
+              className="text-xs text-purple-600 underline hover:text-purple-800 transition-colors">
+              📥 テンプレ保存
+            </button>
+            {loadedTmplIdx !== null && (
+              <button type="button" onClick={handleSaveTemplate}
+                className="text-xs text-orange-600 underline hover:text-orange-800 transition-colors">
+                🔄 「{tmplName}」を上書き更新
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="flex gap-2 items-center mt-1">
+            <input type="text" value={tmplName} onChange={e => setTmplName(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && handleSaveTemplate()}
+              placeholder="テンプレート名（例: 1000×5+200×5）"
+              className="border rounded px-2 py-1.5 text-sm flex-1 focus:ring-2 focus:ring-purple-200 outline-none" />
+            <button type="button" onClick={handleSaveTemplate}
+              className="px-3 py-1.5 text-sm bg-purple-600 text-white rounded-lg hover:bg-purple-700 transition-colors">保存</button>
+            <button type="button" onClick={() => setShowTmpl(false)}
+              className="px-3 py-1.5 text-sm text-gray-500 hover:text-gray-700 transition-colors">×</button>
+          </div>
+        )}
+      </div>
+
+      <div className="mb-4 p-3 bg-gray-50 border border-gray-200 rounded-xl">
+        <h3 className="text-sm font-bold text-gray-700 mb-2">対象選手を選択</h3>
+        <div className="flex flex-wrap gap-1.5 mb-2">
+          {YEARS.map(y => (
+            <button key={y} type="button" onClick={() => selectYear(y)}
+              className="px-3 py-1 text-xs rounded-full border border-indigo-300 bg-indigo-50 text-indigo-700 hover:bg-indigo-100 transition-colors font-medium">
+              {y}全員
+            </button>
+          ))}
+          <button type="button" onClick={() => setSelected(new Set())}
+            className="px-3 py-1 text-xs rounded-full border border-gray-300 bg-white text-gray-500 hover:bg-gray-100 transition-colors">
+            解除
+          </button>
+        </div>
+        <div className="grid grid-cols-3 gap-1 sm:grid-cols-4 lg:grid-cols-5">
+          {athletes.map(a => {
+            const checked = selected.has(a.name);
+            return (
+              <label key={a.name}
+                className={`flex items-center gap-1.5 px-2 py-1.5 rounded-lg border cursor-pointer text-xs transition-colors
+                  ${checked ? 'bg-blue-50 border-blue-400 text-blue-800 font-medium' : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'}`}>
+                <input type="checkbox" checked={checked} onChange={() => toggle(a.name)}
+                  className="w-3 h-3 accent-blue-600 flex-shrink-0" />
+                <span className="truncate">{a.name}</span>
+              </label>
+            );
+          })}
+        </div>
+        <button type="button" onClick={addToAthletes} disabled={selected.size === 0}
+          className="mt-3 px-5 py-2 bg-indigo-600 text-white rounded-lg text-sm font-semibold hover:bg-indigo-700 active:bg-indigo-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm">
+          この選手に追加（{selected.size}名）
+        </button>
+      </div>
+
+      {registeredNames.length > 0 && (
+        <div className="mb-4 p-3 bg-green-50 border border-green-200 rounded-xl">
+          <h3 className="text-sm font-bold text-green-800 mb-3">
+            ✅ 登録済みメニュー（{registeredNames.length}名）
+          </h3>
+          <div className="space-y-2">
+            {registeredNames.map(name => {
+              const entry = menus[name];
+              return (
+                <div key={name} className="bg-white rounded-lg p-2.5 border border-green-100">
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <span className="text-xs font-bold text-gray-700">{name}</span>
+                      {entry.sessionMenu && (
+                        <span className="ml-2 text-xs font-medium text-orange-600 bg-orange-50 px-1.5 py-0.5 rounded">
+                          {entry.sessionMenu}
+                        </span>
+                      )}
+                    </div>
+                    <button type="button" onClick={() => clearAthleteMenu(name)}
+                      className="text-xs text-red-400 hover:text-red-600 transition-colors">全削除</button>
+                  </div>
+                  <div className="mb-2 pb-2 border-b border-green-100">
+                    <label className="block text-xs text-gray-500 mb-1">状態区分</label>
+                    <select value={entry.statusDiv || '通常'} onChange={e => {
+                      setMenus(prev => ({
+                        ...prev,
+                        [name]: { ...prev[name], statusDiv: e.target.value }
+                      }));
+                    }}
+                      className="w-full border rounded px-2 py-1 text-xs focus:ring-2 focus:ring-blue-200 outline-none">
+                      {STATUS_DIVS.map(s => <option key={s}>{s}</option>)}
+                    </select>
+                  </div>
+                  <div className="space-y-0.5 ml-1">
+                    {entry.blocks.map((b, bi) => (
+                      <div key={b.id} className="flex items-center gap-2">
+                        <span className="text-xs text-gray-400 w-5 flex-shrink-0">#{bi+1}</span>
+                        <span className="text-xs text-gray-600 font-mono flex-1">{buildPointMenu(b)}</span>
+                        <span className="text-xs text-blue-400">{calcPointKm(b.distanceM, b.reps, b.sets)}km</span>
+                        <button type="button" onClick={() => deleteMenuBlock(name, b.id)}
+                          className="text-xs text-red-400 hover:text-red-600 transition-colors">削除</button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-3">
+        <button type="button" onClick={handleSave} disabled={registeredNames.length === 0}
+          className="px-6 py-2.5 bg-blue-600 text-white rounded-lg font-semibold text-sm hover:bg-blue-700 active:bg-blue-800 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm">
+          保存（{registeredNames.length}名分）
+        </button>
+        <SavedToast show={saved} />
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// RECORDS VIEW - 入力状況チェックリスト付き
+// ======================================================
+function RecordsView({ records, onDelete, onDeleteAll, onResend, scriptUrl, athletes, onUpdateRecord, failedRecords, onRetryFailed, myName, sessionMeta, onRecordPdfExport }) {
+  const [fDate, setFDate]   = useState(today());
+  const [fName, setFName]   = useState('');
+  const [fType, setFType]   = useState('');
+  const [fYear, setFYear]   = useState('全員');
+  const [editingRecord, setEditingRecord] = useState(null);
+  const [selectedAthlete, setSelectedAthlete] = useState(new Set());
+  const [bulkStatusDiv, setBulkStatusDiv] = useState('');
+  const [checkedIds, setCheckedIds] = useState(new Set());
+  const [rowBulkStatusDiv, setRowBulkStatusDiv] = useState('');
+  const [showSessionDisplay, setShowSessionDisplay] = useState(false);
+  const [displaySessionName, setDisplaySessionName] = useState('');
+  const [showSessionModal, setShowSessionModal] = useState(false);
+  const [inputStatusSession, setInputStatusSession] = useState('朝練習');
+
+  const shown = records.filter(r => {
+    if (myName && r.name !== myName) return false;
+    if (fDate && r.date !== fDate) return false;
+    if (fName && !r.name.includes(fName)) return false;
+    if (fType && r.practiceType !== fType) return false;
+    if (fYear !== '全員' && r.year !== fYear) return false;
+    return true;
+  });
+
+  // PDF用: フィルタ中の日付に含まれるセッション一覧
+  const filteredSessions = fDate
+    ? [...new Set(shown.map(r => r.sessionName).filter(Boolean))]
+    : [];
+  if (fDate && filteredSessions.length === 0) filteredSessions.push('朝練習');
+
+  const handleShowSession = (sessionName) => {
+    setShowSessionModal(false);
+    setDisplaySessionName(sessionName);
+    setShowSessionDisplay(true);
+  };
+
+  // 機能7: 一括状態区分変更
+  const handleRowBulkStatusChange = () => {
+    if (!rowBulkStatusDiv || checkedIds.size === 0) return;
+    checkedIds.forEach(id => {
+      const rec = records.find(r => r.id === id);
+      if (rec) onUpdateRecord({ ...rec, statusDiv: rowBulkStatusDiv });
+    });
+    setCheckedIds(new Set());
+    setRowBulkStatusDiv('');
+  };
+
+  const toggleCheck = (id, e) => {
+    e.stopPropagation();
+    setCheckedIds(prev => {
+      const s = new Set(prev);
+      s.has(id) ? s.delete(id) : s.add(id);
+      return s;
+    });
+  };
+
+  const inputStatus = {};
+  athletes.forEach(a => {
+    inputStatus[a.name] = records.some(r => r.name === a.name && r.date === (fDate || today()) && ((r.sessionName || '朝練習') === inputStatusSession));
+  });
+
+  const handleBulkStatusChange = () => {
+    if (!bulkStatusDiv || selectedAthlete.size === 0) return;
+    const newRecs = records.map(r => {
+      if (selectedAthlete.has(r.name) && r.date === (fDate || today())) {
+        return { ...r, statusDiv: bulkStatusDiv };
+      }
+      return r;
+    });
+    setSelectedAthlete(new Set());
+    setBulkStatusDiv('');
+  };
+
+  const dl = () => downloadCSV(shown, `ekiden_${new Date().toISOString().slice(0,10)}.csv`);
+
+  const statusColor = s =>
+    s === '通常' ? 'bg-green-100 text-green-700' :
+    s === '故障' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700';
+
+  const typeColor = t => t === 'ジョグ・各自' ? 'bg-blue-100 text-blue-700' : 'bg-orange-100 text-orange-700';
+
+  return (
+    <div>
+      {/* 送信失敗警告 */}
+      {failedRecords.length > 0 && (
+        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+          <div className="flex items-center justify-between">
+            <div>
+              <div className="text-sm font-bold text-red-800 mb-1">⚠️ Sheets送信失敗（{failedRecords.length}件）</div>
+              <div className="text-xs text-red-600">ネット接続を確認して再送信してください</div>
+            </div>
+            {scriptUrl && (
+              <button type="button" onClick={() => onRetryFailed(failedRecords)}
+                className="px-4 py-2 bg-red-600 text-white text-sm rounded-lg hover:bg-red-700 transition-colors flex-shrink-0 ml-3">
+                🔄 失敗分を再送
+              </button>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 入力状況チェックリスト */}
+      {fDate && (
+        <div className="mb-4 p-3 bg-indigo-50 border border-indigo-200 rounded-xl">
+          <div className="flex items-center gap-2 mb-3">
+            <h3 className="text-sm font-bold text-indigo-800">📋 入力状況（{fDate}）</h3>
+            <div className="flex gap-1 ml-auto">
+              {['朝練習', '本練習'].map(session => (
+                <button key={session} type="button" onClick={() => setInputStatusSession(session)}
+                  className={`px-3 py-1 text-xs rounded-lg font-medium transition-colors border
+                    ${inputStatusSession === session ? 'bg-indigo-600 text-white border-indigo-600' : 'bg-white text-indigo-600 border-indigo-200 hover:bg-indigo-100'}`}>
+                  {session}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-1 sm:grid-cols-3 lg:grid-cols-4 mb-3">
+            {athletes.map(a => {
+              const done = inputStatus[a.name];
+              const checked = selectedAthlete.has(a.name);
+              return (
+                <label key={a.name}
+                  className={`flex items-center gap-2 px-2 py-1.5 rounded-lg border cursor-pointer text-xs transition-colors
+                    ${checked ? 'bg-blue-100 border-blue-400 text-blue-800' : done ? 'bg-green-50 border-green-200 text-gray-600' : 'bg-red-50 border-red-200 text-gray-600'}`}>
+                  <input type="checkbox" checked={checked} onChange={() => {
+                    const s = new Set(selectedAthlete);
+                    checked ? s.delete(a.name) : s.add(a.name);
+                    setSelectedAthlete(s);
+                  }} className="w-3 h-3 accent-blue-600 flex-shrink-0" />
+                  <span className="truncate font-medium">{a.name}</span>
+                  <span className="text-xs ml-auto">{done ? '✅' : '❌'}</span>
+                </label>
+              );
+            })}
+          </div>
+          {selectedAthlete.size > 0 && (
+            <div className="flex gap-2 items-center">
+              <select value={bulkStatusDiv} onChange={e => setBulkStatusDiv(e.target.value)}
+                className="flex-1 border rounded px-2 py-1.5 text-xs focus:ring-2 focus:ring-indigo-300 outline-none">
+                <option value="">状態区分を選択</option>
+                {STATUS_DIVS.map(s => <option key={s}>{s}</option>)}
+              </select>
+              <button type="button" onClick={handleBulkStatusChange} disabled={!bulkStatusDiv}
+                className="px-3 py-1.5 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors">
+                {selectedAthlete.size}人を一括変更
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Filters */}
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 mb-2">
+        <label className="block">
+          <span className="block text-xs text-gray-500 mb-1">日付</span>
+          <div className="flex items-center">
+            <input type="date" value={fDate} onChange={e => setFDate(e.target.value)}
+              className="flex-1 border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-200 outline-none" />
+            {fDate && (
+              <button type="button" onClick={() => setFDate('')}
+                className="ml-1 px-2 py-1 text-sm text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded transition-colors"
+                title="日付フィルタをクリア">
+                ×
+              </button>
+            )}
+          </div>
+        </label>
+        {!myName && (
+          <label className="block">
+            <span className="block text-xs text-gray-500 mb-1">選手名</span>
+            <input type="text" value={fName} onChange={e => setFName(e.target.value)}
+              className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-200 outline-none" placeholder="名前で絞込" />
+          </label>
+        )}
+        <label className="block">
+          <span className="block text-xs text-gray-500 mb-1">練習タイプ</span>
+          <select value={fType} onChange={e => setFType(e.target.value)}
+            className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-200 outline-none">
+            <option value="">すべて</option>
+            <option>ジョグ・各自</option>
+            <option>ポイント練習</option>
+          </select>
+        </label>
+      </div>
+      {/* 学年フィルター（マネージャーモードのみ） */}
+      {!myName && (
+        <div className="flex flex-wrap gap-2 mb-4 items-center">
+          <span className="text-xs text-gray-500 font-medium">学年:</span>
+          {['全員', ...YEARS].map(y => (
+            <button key={y} type="button" onClick={() => setFYear(y)}
+              className={`px-3 py-1 text-xs rounded-full border transition-colors font-medium
+                ${fYear === y ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-300 hover:bg-gray-50'}`}>
+              {y}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex justify-between items-center mb-3 flex-wrap gap-2">
+        <span className="text-sm text-gray-600">
+          表示 <strong>{shown.length}</strong> 件 / 全 <strong>{records.length}</strong> 件
+        </span>
+        <div className="flex gap-2">
+          <button type="button" onClick={dl} disabled={shown.length === 0}
+            className="px-4 py-1.5 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm">
+            ⬇ CSV
+          </button>
+          {fDate && shown.length > 0 && (
+            <button type="button" onClick={() => setShowSessionModal(true)}
+              className="px-4 py-1.5 bg-orange-600 text-white text-sm rounded-lg hover:bg-orange-700 transition-colors shadow-sm">
+              📋 セッション表示
+            </button>
+          )}
+          {scriptUrl && (
+            <button type="button" onClick={() => onResend(shown)} disabled={shown.length === 0}
+              className="px-4 py-1.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 disabled:opacity-40 disabled:cursor-not-allowed transition-colors shadow-sm">
+              📤 Sheetsに再送信
+            </button>
+          )}
+          {records.length > 0 && (
+            <button type="button"
+              onClick={() => { if (window.confirm('全記録を削除しますか？この操作は元に戻せません。')) onDeleteAll(); }}
+              className="px-4 py-1.5 bg-red-100 text-red-600 text-sm rounded-lg hover:bg-red-200 transition-colors">
+              全削除
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 機能7: 選択中バー */}
+      {checkedIds.size > 0 && (
+        <div className="mb-3 p-2 bg-indigo-50 border border-indigo-200 rounded-lg flex flex-wrap gap-2 items-center">
+          <span className="text-xs font-semibold text-indigo-800">選択中 {checkedIds.size} 件の状態区分を変更：</span>
+          <select value={rowBulkStatusDiv} onChange={e => setRowBulkStatusDiv(e.target.value)}
+            className="border rounded px-2 py-1 text-xs focus:ring-2 focus:ring-indigo-300 outline-none">
+            <option value="">選択してください</option>
+            {STATUS_DIVS.map(s => <option key={s}>{s}</option>)}
+          </select>
+          <button type="button" onClick={handleRowBulkStatusChange} disabled={!rowBulkStatusDiv}
+            className="px-3 py-1 bg-indigo-600 text-white text-xs rounded-lg hover:bg-indigo-700 disabled:opacity-40 transition-colors">
+            変更
+          </button>
+          <button type="button" onClick={() => setCheckedIds(new Set())}
+            className="px-3 py-1 text-xs text-gray-500 hover:text-gray-700 transition-colors">
+            解除
+          </button>
+        </div>
+      )}
+
+      {shown.length === 0 ? (
+        <div className="text-center py-16 text-gray-400">
+          <div className="text-4xl mb-3">📋</div>
+          <div className="text-sm">記録がありません</div>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-gray-200 shadow-sm bg-white">
+          <table className="w-full text-xs min-w-[700px]">
+            <thead className="bg-gray-50 border-b border-gray-200">
+              <tr>
+                <th className="px-2 py-2.5 text-left text-gray-500 font-semibold whitespace-nowrap w-6"></th>
+                {['日付','氏名','学年','状態','タイプ','実施','場所','メニュー表示','距離','備考',''].map(h => (
+                  <th key={h} className="px-2 py-2.5 text-left text-gray-500 font-semibold whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {shown.map(r => (
+                <tr key={r.id} className="hover:bg-blue-50/40 transition-colors cursor-pointer" onClick={() => setEditingRecord({...r})}>
+                  <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
+                    {/* 機能7: チェックボックス */}
+                    <input type="checkbox" checked={checkedIds.has(r.id)}
+                      onChange={e => toggleCheck(r.id, e)}
+                      className="w-3 h-3 accent-indigo-600" />
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap font-mono">{r.date}</td>
+                  <td className="px-2 py-2 whitespace-nowrap font-medium text-gray-800">{r.name}</td>
+                  <td className="px-2 py-2 whitespace-nowrap text-gray-600">{r.year}</td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${statusColor(r.statusDiv)}`}>{r.statusDiv}</span>
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap">
+                    <span className={`px-1.5 py-0.5 rounded text-xs font-medium ${typeColor(r.practiceType)}`}>
+                      {r.practiceType === 'ジョグ・各自' ? 'ジョグ' : 'ポイント'}
+                    </span>
+                  </td>
+                  <td className="px-2 py-2 whitespace-nowrap text-gray-600">{r.sessionType || '—'}</td>
+                  <td className="px-2 py-2 whitespace-nowrap text-gray-600">{r.location}</td>
+                  <td className="px-2 py-2 font-mono text-gray-800 max-w-xs truncate" title={r.displayMenu}>{r.displayMenu}</td>
+                  <td className="px-2 py-2 whitespace-nowrap text-gray-600 text-right">
+                    {r.practiceType === 'ジョグ・各自'
+                      ? (r.distanceKm !== '' ? `${r.distanceKm}km` : '')
+                      : (r.pointDistanceKm ? `${r.pointDistanceKm}km` : '')}
+                  </td>
+                  <td className="px-2 py-2 text-gray-500 max-w-[100px] truncate" title={r.note}>{r.note}</td>
+                  <td className="px-2 py-2" onClick={e => e.stopPropagation()}>
+                    {/* 機能3: 削除確認ダイアログ */}
+                    <button type="button" onClick={() => {
+                      if (window.confirm('この記録を削除しますか？')) onDelete(r.id);
+                    }}
+                      className="text-red-400 hover:text-red-600 transition-colors w-5 h-5 flex items-center justify-center rounded hover:bg-red-50">
+                      ×
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* セッション選択モーダル */}
+      {showSessionModal && fDate && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowSessionModal(false)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-sm p-6">
+            <h2 className="text-base font-bold text-gray-800 mb-4">📋 セッション選択</h2>
+            <p className="text-sm text-gray-600 mb-4">表示するセッションを選択してください</p>
+            {filteredSessions.length === 0 ? (
+              <p className="text-xs text-gray-500 mb-4">この日付のセッションはありません</p>
+            ) : (
+              <div className="space-y-2 mb-4">
+                {filteredSessions.map(s => (
+                  <button key={s} type="button" onClick={() => handleShowSession(s)}
+                    className="w-full px-4 py-2.5 bg-orange-50 border border-orange-200 text-orange-700 rounded-lg hover:bg-orange-100 transition-colors text-sm font-medium">
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button onClick={() => setShowSessionModal(false)}
+              className="w-full px-4 py-2 text-sm text-gray-500 hover:text-gray-700">
+              キャンセル
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* セッション表示パネル（スクショ用） */}
+      {showSessionDisplay && fDate && displaySessionName && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowSessionDisplay(false)}>
+          <div className="bg-white rounded-xl shadow-2xl max-h-[90vh] overflow-y-auto p-6 w-full max-w-4xl">
+            <div className="flex justify-between items-center mb-4">
+              <h2 className="text-lg font-bold text-gray-800">📋 セッション表示</h2>
+              <button onClick={() => setShowSessionDisplay(false)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+            </div>
+            {(() => {
+              const metaKey = `${fDate}_${displaySessionName}`;
+              const meta = (sessionMeta && sessionMeta[metaKey]) || {};
+              const sessionRecords = shown.filter(r =>
+                r.date === fDate && ((r.sessionName || '朝練習') === displaySessionName)
+              );
+              const yOrder = { '4年': 0, '3年': 1, '2年': 2, '1年': 3 };
+              const seenNames = new Set();
+              const unique = sessionRecords.filter(r => {
+                if (seenNames.has(r.name)) return false;
+                seenNames.add(r.name);
+                return true;
+              });
+              const sorted = [...unique].sort((a, b) => {
+                if (yOrder[a.year] !== yOrder[b.year]) return (yOrder[a.year] ?? 9) - (yOrder[b.year] ?? 9);
+                return a.name.localeCompare(b.name, 'ja');
+              });
+              const temp = (meta.temperature !== undefined && meta.temperature !== '') ? meta.temperature + '℃' : '—';
+              const hum = (meta.humidity !== undefined && meta.humidity !== '') ? meta.humidity + '%' : '—';
+              const wind = meta.wind || '—';
+              const loc = meta.location || '—';
+              return (
+                <>
+                  <div className="text-center mb-6">
+                    <h3 className="text-2xl font-bold text-gray-800 mb-3">{fDate}（{displaySessionName}）練習記録</h3>
+                    <div className="flex gap-6 justify-center flex-wrap text-sm text-gray-600 mb-2">
+                      <span>📍 {loc}</span>
+                      <span>🌡 {temp}</span>
+                      <span>💧 {hum}</span>
+                      <span>💨 {wind}</span>
+                    </div>
+                  </div>
+                  {sorted.length === 0 ? (
+                    <div className="text-center py-8 text-gray-400">記録がありません</div>
+                  ) : (
+                    <div className="overflow-x-auto rounded-lg border border-gray-200 bg-white">
+                      <table className="w-full text-sm">
+                        <thead className="bg-gray-100 border-b border-gray-200">
+                          <tr>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-700">名前</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-700">距離 (km)</th>
+                            <th className="px-4 py-2.5 text-right font-semibold text-gray-700">時間 (分)</th>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-700">セクション</th>
+                            <th className="px-4 py-2.5 text-left font-semibold text-gray-700">備考</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-gray-100">
+                          {sorted.map((r, i) => {
+                            const isInjured = r.statusDiv === '故障';
+                            const dist = r.practiceType === 'ジョグ・各自'
+                              ? (r.distanceKm !== '' && r.distanceKm !== undefined ? `${r.distanceKm}km` : '—') : '—';
+                            const time = r.practiceType === 'ジョグ・各自'
+                              ? (r.durationMin !== '' && r.durationMin !== undefined ? `${r.durationMin}分` : '—') : '—';
+                            const section = r.practiceType === 'ポイント練習'
+                              ? (r.sessionMenu || r.displayMenu || '—') : '—';
+                            const note = r.practiceType === 'ジョグ・各自' ? (r.note || '') : (meta.sessionNote || '');
+                            return (
+                              <tr key={r.name} className={isInjured ? 'bg-red-50' : (i % 2 === 0 ? 'bg-white' : 'bg-gray-50')}>
+                                <td className={`px-4 py-2.5 font-medium ${isInjured ? 'text-red-600 font-bold' : 'text-gray-800'}`}>
+                                  {r.year} {r.name}{isInjured ? ' ★故障' : ''}
+                                </td>
+                                <td className="px-4 py-2.5 text-right text-gray-700">{dist}</td>
+                                <td className="px-4 py-2.5 text-right text-gray-700">{time}</td>
+                                <td className="px-4 py-2.5 text-gray-700">{section}</td>
+                                <td className="px-4 py-2.5 text-gray-700">{note}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  <div className="mt-6 text-center text-xs text-gray-400">
+                    💡 このページをスクショして共有してください
+                  </div>
+                </>
+              );
+            })()}
+          </div>
+        </div>
+      )}
+
+      {/* 編集モーダル */}
+      {editingRecord && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setEditingRecord(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-5 max-h-96 overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-base font-bold text-gray-800">📝 記録を編集</h2>
+              <button type="button" onClick={() => setEditingRecord(null)} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
+            </div>
+
+            <div className="space-y-3">
+              <label className="block">
+                <span className="text-xs text-gray-500 mb-1 block font-semibold">日付</span>
+                <input type="date" value={editingRecord.date} onChange={e => setEditingRecord({...editingRecord, date: e.target.value})}
+                  className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+              </label>
+
+              <label className="block">
+                <span className="text-xs text-gray-500 mb-1 block font-semibold">状態区分</span>
+                <select value={editingRecord.statusDiv} onChange={e => setEditingRecord({...editingRecord, statusDiv: e.target.value})}
+                  className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none">
+                  {STATUS_DIVS.map(s => <option key={s}>{s}</option>)}
+                </select>
+              </label>
+
+              <label className="block">
+                <span className="text-xs text-gray-500 mb-1 block font-semibold">場所</span>
+                <input type="text" value={editingRecord.location} onChange={e => setEditingRecord({...editingRecord, location: e.target.value})}
+                  className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+              </label>
+
+              {editingRecord.practiceType === 'ジョグ・各自' && (
+                <>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">距離 km</span>
+                    <input type="number" step="0.1" value={editingRecord.distanceKm || ''} onChange={e => setEditingRecord({...editingRecord, distanceKm: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">時間 分</span>
+                    <input type="number" step="1" value={editingRecord.durationMin || ''} onChange={e => setEditingRecord({...editingRecord, durationMin: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+                  </label>
+                </>
+              )}
+
+              {editingRecord.practiceType === 'ポイント練習' && (
+                <>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">距離 m</span>
+                    <input type="number" value={editingRecord.distanceM || ''} onChange={e => setEditingRecord({...editingRecord, distanceM: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">本数</span>
+                    <input type="number" value={editingRecord.reps || ''} onChange={e => setEditingRecord({...editingRecord, reps: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">セット数</span>
+                    <input type="number" min="1" value={editingRecord.sets || ''} onChange={e => setEditingRecord({...editingRecord, sets: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">設定</span>
+                    <input type="text" value={editingRecord.target || ''} onChange={e => setEditingRecord({...editingRecord, target: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" placeholder="例: 3'10&quot;" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">本数間レスト</span>
+                    <input type="text" value={editingRecord.restBetweenReps || ''} onChange={e => setEditingRecord({...editingRecord, restBetweenReps: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" placeholder="例: R=2'00&quot;" />
+                  </label>
+                  <label className="block">
+                    <span className="text-xs text-gray-500 mb-1 block font-semibold">セット間レスト</span>
+                    <input type="text" value={editingRecord.restBetweenSets || ''} onChange={e => setEditingRecord({...editingRecord, restBetweenSets: e.target.value})}
+                      className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" placeholder="（任意）" />
+                  </label>
+                </>
+              )}
+
+              <label className="block">
+                <span className="text-xs text-gray-500 mb-1 block font-semibold">備考</span>
+                <input type="text" value={editingRecord.note || ''} onChange={e => setEditingRecord({...editingRecord, note: e.target.value})}
+                  className="w-full border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+              </label>
+            </div>
+
+            <div className="flex gap-2 justify-end mt-5">
+              <button type="button" onClick={() => setEditingRecord(null)}
+                className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">キャンセル</button>
+              <button type="button" onClick={() => {
+                let rec = { ...editingRecord };
+                // 機能1: ポイント練習の場合にdisplayMenuとpointDistanceKmを再計算
+                if (rec.practiceType === 'ポイント練習') {
+                  rec.displayMenu = buildPointMenu({
+                    distanceM: rec.distanceM,
+                    reps: rec.reps,
+                    sets: rec.sets,
+                    target: rec.target,
+                    restBetweenReps: rec.restBetweenReps,
+                    restBetweenSets: rec.restBetweenSets,
+                  });
+                  rec.pointDistanceKm = calcPointKm(rec.distanceM, rec.reps, rec.sets);
+                }
+                onUpdateRecord(rec);
+                setEditingRecord(null);
+              }}
+                className="px-5 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 transition-colors shadow-sm">
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ======================================================
+// ADMIN VIEW
+// ======================================================
+function AdminView({ athletes, onAddAthlete, onDeleteAthlete, templates, onSaveTemplate, onUpdateTemplate, onDeleteTemplate, contentTags, onAddContentTag, onDeleteContentTag, records, onImport, isAthlete, editingTemplateIdx, setEditingTemplateIdx, editTmplName, setEditTmplName, editTmplMenu, setEditTmplMenu }) {
+  const [newName, setNewName] = useState('');
+  const [newYear, setNewYear] = useState('1年');
+  const [newTag, setNewTag] = useState('');
+  const [selectedYearChange, setSelectedYearChange] = useState(new Set());
+  const [newYearForChange, setNewYearForChange] = useState('1年');
+
+  const handleAddAthlete = () => {
+    if (!newName.trim()) return;
+    if (!window.confirm(`${newName.trim()}を${newYear}として追加してよろしいですか？`)) return;
+    onAddAthlete({ name: newName.trim(), year: newYear });
+    setNewName('');
+  };
+
+  const handleBulkYearChange = () => {
+    if (selectedYearChange.size === 0 || !newYearForChange) return;
+    const names = Array.from(selectedYearChange).join('、');
+    if (!window.confirm(`${names}を${newYearForChange}に変更してよろしいですか？`)) return;
+    selectedYearChange.forEach(name => {
+      const idx = athletes.findIndex(a => a.name === name);
+      if (idx >= 0) {
+        onUpdateAthlete(idx, { ...athletes[idx], year: newYearForChange });
+      }
+    });
+    setSelectedYearChange(new Set());
+  };
+
+  const onUpdateAthlete = (idx, ath) => {
+    onDeleteAthlete(idx);
+    onAddAthlete(ath);
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* 選手管理 */}
+      <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+        <h3 className="text-sm font-bold text-gray-700 mb-3">👥 選手管理</h3>
+        {!isAthlete && (
+          <div className="flex gap-2 mb-3">
+            <input type="text" value={newName} onChange={e => setNewName(e.target.value)}
+              placeholder="選手名" onKeyDown={e => e.key === 'Enter' && handleAddAthlete()}
+              className="flex-1 border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+            <select value={newYear} onChange={e => setNewYear(e.target.value)}
+              className="border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none">
+              {YEARS.map(y => <option key={y}>{y}</option>)}
+            </select>
+            <button type="button" onClick={handleAddAthlete}
+              className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors">
+              追加
+            </button>
+          </div>
+        )}
+
+        <div className="mb-3">
+          <h4 className="text-xs font-semibold text-gray-600 mb-2">選手一覧（学年別）</h4>
+          <div className="space-y-2 max-h-48 overflow-y-auto">
+            {YEARS.map(y => {
+              const yAth = athletes.filter(a => a.year === y).sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+              if (yAth.length === 0) return null;
+              return (
+                <div key={y}>
+                  <div className="text-xs font-bold text-gray-600 mb-1">{y}</div>
+                  <div className="grid grid-cols-2 gap-1 sm:grid-cols-3">
+                    {yAth.map(a => (
+                      <div key={a.name} className="flex items-center gap-1 px-2 py-1 bg-gray-50 border border-gray-200 rounded text-xs">
+                        <input type="checkbox" onChange={e => {
+                          const s = new Set(selectedYearChange);
+                          e.target.checked ? s.add(a.name) : s.delete(a.name);
+                          setSelectedYearChange(s);
+                        }} className="w-3 h-3 flex-shrink-0" />
+                        <span className="flex-1 truncate">{a.name}</span>
+                        {!isAthlete && (
+                          <button type="button" onClick={() => {
+                            if (!window.confirm(`${a.name}を削除してよろしいですか？`)) return;
+                            const idx = athletes.findIndex(x => x.name === a.name);
+                            onDeleteAthlete(idx);
+                          }} className="text-red-400 hover:text-red-600 text-xs leading-none">×</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {selectedYearChange.size > 0 && (
+          <div className="flex gap-2 items-center p-2 bg-blue-50 border border-blue-200 rounded">
+            <select value={newYearForChange} onChange={e => setNewYearForChange(e.target.value)}
+              className="border rounded px-2 py-1 text-xs focus:ring-1 focus:ring-blue-300 outline-none">
+              {YEARS.map(y => <option key={y}>{y}</option>)}
+            </select>
+            <button type="button" onClick={handleBulkYearChange}
+              className="px-3 py-1 bg-indigo-600 text-white text-xs rounded hover:bg-indigo-700 transition-colors">
+              選択した{selectedYearChange.size}人を変更
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* テンプレ管理 */}
+      <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+        <h3 className="text-sm font-bold text-gray-700 mb-3">⚡ テンプレ管理</h3>
+        {templates.length === 0 ? (
+          <p className="text-xs text-gray-500">保存済みテンプレートはありません</p>
+        ) : (
+          <div className="space-y-1 max-h-48 overflow-y-auto">
+            {templates.map((t, i) => (
+              <div key={i} className="flex items-center justify-between px-2 py-2 bg-gray-50 border border-gray-200 rounded hover:bg-gray-100 transition-colors">
+                <button type="button" onClick={() => {
+                  setEditingTemplateIdx(i);
+                  setEditTmplName(t.name);
+                  setEditTmplMenu(t.sessionMenu || '');
+                }} className="flex-1 text-left cursor-pointer">
+                  <div className="text-xs">
+                    <div className="font-medium text-gray-700">{t.name}</div>
+                    {t.sessionMenu && <div className="text-gray-500 text-xs">{t.sessionMenu}</div>}
+                  </div>
+                </button>
+                {!isAthlete && (
+                  <button type="button" onClick={() => {
+                    if (!window.confirm(`テンプレ「${t.name}」を削除してよろしいですか？`)) return;
+                    onDeleteTemplate(i);
+                  }}
+                    className="text-red-400 hover:text-red-600 text-xs px-2 py-1 rounded hover:bg-red-50">削除</button>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* 機能8: データ管理 */}
+      <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+        <h3 className="text-sm font-bold text-gray-700 mb-3">💾 データ管理</h3>
+        <div className="flex flex-wrap gap-3 items-center">
+          <button type="button" onClick={() => {
+            const data = { records, templates, athletes, contentTags };
+            const json = JSON.stringify(data, null, 2);
+            const blob = new Blob([json], { type: 'application/json;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `ekiden-backup-${new Date().toISOString().slice(0,10)}.json`;
+            a.click();
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
+          }}
+            className="px-4 py-2 bg-green-600 text-white text-sm rounded-lg hover:bg-green-700 transition-colors shadow-sm font-medium">
+            ⬇ JSONでエクスポート
+          </button>
+          <label className="px-4 py-2 bg-orange-500 text-white text-sm rounded-lg hover:bg-orange-600 transition-colors shadow-sm font-medium cursor-pointer">
+            ⬆ JSONからインポート
+            <input type="file" accept=".json" className="hidden" onChange={e => {
+              const file = e.target.files[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = ev => {
+                try {
+                  const data = JSON.parse(ev.target.result);
+                  if (!window.confirm('現在のデータを上書きします。よろしいですか？')) return;
+                  onImport(data);
+                  const total = (data.records || []).length;
+                  alert(`インポート完了（${total}件）`);
+                } catch {
+                  alert('JSONの読み込みに失敗しました。ファイルを確認してください。');
+                }
+              };
+              reader.readAsText(file);
+              e.target.value = '';
+            }} />
+          </label>
+        </div>
+        <p className="text-xs text-gray-400 mt-2">エクスポート：records・templates・athletes・contentTagsを1ファイルに保存。インポート：既存データを上書きします。</p>
+      </div>
+
+      {/* タグ管理 */}
+      <div className="bg-white border border-gray-200 rounded-lg p-4 shadow-sm">
+        <h3 className="text-sm font-bold text-gray-700 mb-3">🏷️ 内容タグ管理</h3>
+        <div className="flex gap-2 mb-3">
+          <input type="text" value={newTag} onChange={e => setNewTag(e.target.value)}
+            placeholder="タグ名（例: 各自、集団走）" onKeyDown={e => {
+              if (e.key === 'Enter' && newTag.trim()) {
+                onAddContentTag(newTag.trim());
+                setNewTag('');
+              }
+            }}
+            className="flex-1 border rounded px-2 py-1.5 text-sm focus:ring-2 focus:ring-blue-300 outline-none" />
+          <button type="button" onClick={() => {
+            if (newTag.trim()) {
+              onAddContentTag(newTag.trim());
+              setNewTag('');
+            }
+          }}
+            className="px-4 py-1.5 bg-blue-600 text-white text-sm rounded-lg hover:bg-blue-700 transition-colors">
+            追加
+          </button>
+        </div>
+
+        <div className="flex flex-wrap gap-1">
+          {contentTags.map((t, i) => (
+            <div key={i} className="inline-flex items-center gap-1 px-2 py-1 bg-blue-50 border border-blue-200 rounded text-xs">
+              <span className="font-medium text-blue-700">{t}</span>
+              {!isAthlete && (
+                <button type="button" onClick={() => {
+                  if (!window.confirm(`タグ「${t}」を削除してよろしいですか？`)) return;
+                  onDeleteContentTag(i);
+                }}
+                  className="text-red-400 hover:text-red-600 text-xs leading-none">×</button>
+              )}
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ======================================================
+// APP
+// ======================================================
+function App() {
+  const [records, setRecords]     = useLS('ekiden_records', []);
+  const [failedRecords, setFailedRecords] = useLS('ekiden_failed_records', []);
+  const [templates, setTemplates] = useLS('ekiden_templates', []);
+  const [scriptUrl, setScriptUrl] = useLS('ekiden_script_url', '');
+  const [athletes, setAthletes]   = useLS('ekiden_athletes', []);
+  const [contentTags, setContentTags] = useLS('ekiden_content_tags', ['各自', '集団走', 'Free']);
+  // 個人選択モード
+  const [userMode, setUserMode]       = useLS('ekiden_user_mode', null);
+  const [selectedUser, setSelectedUser] = useLS('ekiden_selected_user', null);
+  // 管理画面PIN
+  const [adminPin, setAdminPin]       = useLS('ekiden_admin_pin', '');
+  // セッションメタデータ / PDF履歴
+  const [sessionMeta, setSessionMeta] = useLS('ekiden_session_meta', {});
+  const [pdfHistory, setPdfHistory]   = useLS('ekiden_pdf_history', []);
+  const [tab, setTab]             = useState('jog');
+  const [s, setS]                 = useState({
+    date: today(), location: '名城G', statusDiv: '通常',
+    sessionName: '朝練習', temperature: '', humidity: '', wind: '',
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [syncState, setSyncState]       = useState(null);
+  const [loading, setLoading]           = useState(true);
+  const [showAdminPin, setShowAdminPin] = useState(false);
+  const [adminUnlocked, setAdminUnlocked] = useState(false);
+  const [editingTemplateIdx, setEditingTemplateIdx] = useState(null);
+  const [editTmplName, setEditTmplName] = useState('');
+  const [editTmplMenu, setEditTmplMenu] = useState('');
+  const syncTimer = useRef(null);
+
+  // 派生値
+  const isManager = userMode === 'manager';
+  const isAthlete = userMode === 'athlete';
+  const myName    = isAthlete ? selectedUser : null;
+
+  // 選手モードで管理タブにいたらjogに戻す
+  useEffect(() => {
+    if (isAthlete && tab === 'admin') setTab('jog');
+  }, [isAthlete]);
+
+  useEffect(() => {
+    const initializeApp = async () => {
+      if (scriptUrl) {
+        const data = await fetchMasterData(scriptUrl);
+        if (data && data.athletes && data.contentTags) {
+          const sorted = data.athletes.sort((a, b) => {
+            const yOrder = { '4年': 0, '3年': 1, '2年': 2, '1年': 3 };
+            if (yOrder[a.year] !== yOrder[b.year]) return yOrder[a.year] - yOrder[b.year];
+            return a.name.localeCompare(b.name, 'ja');
+          });
+          setAthletes(sorted);
+          setContentTags(data.contentTags);
+        }
+      }
+      setLoading(false);
+    };
+    initializeApp();
+  }, [scriptUrl]);
+
+  const onChange = (field, val) => setS(p => ({ ...p, [field]: val }));
+  const saveSessionMeta = (date, sessionName, meta) => {
+    const key = `${date}_${sessionName}`;
+    setSessionMeta(prev => ({ ...prev, [key]: meta }));
+  };
+  const recordPdfExport = (entry) => setPdfHistory(prev => [...prev, entry]);
+  const common   = { s, onChange, onSaveSessionMeta: saveSessionMeta };
+
+  const showSync = (state) => {
+    setSyncState(state);
+    clearTimeout(syncTimer.current);
+    if (state.status !== 'syncing') {
+      syncTimer.current = setTimeout(() => setSyncState(null), 4000);
+    }
+  };
+
+  const sendToSheets = useCallback(async (recs) => {
+    if (!scriptUrl) return;
+    showSync({ status: 'syncing' });
+    try {
+      await postToSheets(scriptUrl, recs);
+      if (scriptUrl) {
+        const data = await fetchMasterData(scriptUrl);
+        if (data && data.athletes && data.contentTags) {
+          const sorted = data.athletes.sort((a, b) => {
+            const yOrder = { '4年': 0, '3年': 1, '2年': 2, '1年': 3 };
+            if (yOrder[a.year] !== yOrder[b.year]) return yOrder[a.year] - yOrder[b.year];
+            return a.name.localeCompare(b.name, 'ja');
+          });
+          setAthletes(sorted);
+          setContentTags(data.contentTags);
+        }
+      }
+      showSync({ status: 'ok', count: recs.length });
+      setFailedRecords(prev => prev.filter(f => !recs.find(r => r.id === f.id)));
+    } catch {
+      showSync({ status: 'error', count: recs.length });
+      setFailedRecords(prev => {
+        const existing = new Set(prev.map(r => r.id));
+        const newFailed = recs.filter(r => !existing.has(r.id));
+        return [...prev, ...newFailed];
+      });
+    }
+  }, [scriptUrl]);
+
+  const addRecords = (recs) => {
+    setRecords(prev => [...prev, ...recs]);
+    sendToSheets(recs);
+  };
+
+  const deleteRecord  = id   => setRecords(prev => prev.filter(r => r.id !== id));
+  const deleteAll     = ()   => setRecords([]);
+  const updateRecord  = r    => setRecords(prev => prev.map(x => x.id === r.id ? r : x));
+  const retryFailed   = recs => {
+    sendToSheets(recs);
+  };
+  const addTemplate    = tmpl        => setTemplates(prev => [...prev, tmpl]);
+  const updateTemplate = (idx, tmpl) => setTemplates(prev => prev.map((t,i) => i===idx ? tmpl : t));
+  const deleteTemplate = idx         => setTemplates(prev => prev.filter((_,i) => i!==idx));
+
+  const addAthlete     = a => setAthletes(prev => [...prev, a]);
+  const deleteAthlete  = i => setAthletes(prev => prev.filter((_,j) => j!==i));
+  const addContentTag  = t => setContentTags(prev => [...prev, t]);
+  const deleteContentTag = i => setContentTags(prev => prev.filter((_,j) => j!==i));
+
+  // 機能8: インポート処理
+  const handleImport = (data) => {
+    if (Array.isArray(data.records))     setRecords(data.records);
+    if (Array.isArray(data.templates))   setTemplates(data.templates);
+    if (Array.isArray(data.athletes))    setAthletes(data.athletes);
+    if (Array.isArray(data.contentTags)) setContentTags(data.contentTags);
+  };
+
+  const todayCount = records.filter(r => r.date === today()).length;
+
+  const TABS = [
+    { id: 'jog',     icon: '🏃', label: 'ジョグ入力' },
+    { id: 'point',   icon: '⚡', label: 'ポイント練習' },
+    { id: 'records', icon: '📋', label: `記録一覧 (${records.length})`, badge: todayCount > 0 ? `今日${todayCount}件` : null },
+    ...(isAthlete ? [] : [{ id: 'admin', icon: '⚙', label: '管理画面' }]),
+  ];
+
+  // 管理タブクリック時のPINロック制御
+  const handleTabClick = (tabId) => {
+    if (tabId === 'admin' && !adminUnlocked) {
+      setShowAdminPin(true);
+      return;
+    }
+    setTab(tabId);
+  };
+
+  if (loading) return <div className="min-h-screen bg-gray-100 flex items-center justify-center">読み込み中...</div>;
+
+  // 個人未選択時は選択モーダルを表示
+  if (userMode === null) {
+    return (
+      <PersonSelectModal
+        athletes={athletes}
+        onConfirm={(mode, name) => { setUserMode(mode); setSelectedUser(name); }}
+      />
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gray-100">
+      <header style={{background: 'linear-gradient(135deg, #a52a2a 0%, #8b3a3a 50%, #6b2424 100%)'}} className="text-white px-4 py-3 shadow-lg">
+        <div className="flex items-center justify-between max-w-4xl mx-auto">
+          <div>
+            <h1 className="text-lg font-bold tracking-wide">女子駅伝部 練習記録</h1>
+            <p className="text-blue-200 text-xs mt-0.5 flex items-center gap-1.5">
+              Practice Record Manager
+              {scriptUrl
+                ? <span className="bg-green-500 text-white text-xs px-1.5 py-0.5 rounded-full">Sheets連携中</span>
+                : <span className="bg-blue-500/60 text-blue-100 text-xs px-1.5 py-0.5 rounded-full">ローカル保存</span>}
+            </p>
+            <div className="mt-1 flex items-center gap-2">
+              <span className="text-blue-100 text-xs">
+                {isManager ? '👑 マネージャー' : `🏃 ${selectedUser}`}
+              </span>
+              <button type="button"
+                onClick={() => { setUserMode(null); setSelectedUser(null); setAdminUnlocked(false); setTab('jog'); }}
+                className="text-xs bg-blue-500/40 hover:bg-blue-500/70 text-white px-2 py-0.5 rounded-full transition-colors">
+                切り替え
+              </button>
+            </div>
+          </div>
+          <button type="button" onClick={() => setShowSettings(true)}
+            className="w-9 h-9 flex items-center justify-center rounded-full bg-blue-500/40 hover:bg-blue-500/70 transition-colors text-lg"
+            title="設定">⚙</button>
+        </div>
+      </header>
+
+      <nav className="bg-white border-b border-gray-200 shadow-sm sticky top-0 z-20">
+        <div className="flex max-w-4xl mx-auto overflow-x-auto">
+          {TABS.map(t => (
+            <button key={t.id} type="button" onClick={() => handleTabClick(t.id)}
+              className={`flex-1 py-3 px-2 text-xs sm:text-sm font-medium transition-colors whitespace-nowrap
+                ${tab === t.id ? 'tab-active' : 'tab-inactive'}`}>
+              <span className="mr-1">{t.icon}</span>
+              <span className="hidden xs:inline sm:inline">{t.label}</span>
+              {/* 機能6: バッジ */}
+              {t.badge && (
+                <span className="ml-1 inline-block bg-red-500 text-white text-xs font-bold px-1.5 py-0.5 rounded-full leading-none">{t.badge}</span>
+              )}
+            </button>
+          ))}
+        </div>
+      </nav>
+
+      <main className="max-w-4xl mx-auto p-3 sm:p-4 pb-12">
+        {tab === 'jog'     && <JogView     common={common} onSave={addRecords}
+                                onSaveSessionMeta={saveSessionMeta}
+                                athletes={athletes} contentTags={contentTags} records={records} myName={myName} />}
+        {tab === 'point'   && <PointView   common={common} onSave={addRecords}
+                                onSaveSessionMeta={saveSessionMeta}
+                                templates={templates} onSaveTemplate={addTemplate}
+                                onUpdateTemplate={updateTemplate} onDeleteTemplate={deleteTemplate}
+                                athletes={athletes} contentTags={contentTags} />}
+        {tab === 'records' && <RecordsView records={records} onDelete={deleteRecord}
+                                onDeleteAll={deleteAll} scriptUrl={scriptUrl} athletes={athletes}
+                                onResend={recs => sendToSheets(recs)} onUpdateRecord={updateRecord}
+                                failedRecords={failedRecords} onRetryFailed={retryFailed}
+                                myName={myName} sessionMeta={sessionMeta} onRecordPdfExport={recordPdfExport} />}
+        {tab === 'admin'   && <AdminView   athletes={athletes} onAddAthlete={addAthlete} onDeleteAthlete={deleteAthlete}
+                                templates={templates} onSaveTemplate={addTemplate}
+                                onUpdateTemplate={updateTemplate} onDeleteTemplate={deleteTemplate}
+                                contentTags={contentTags} onAddContentTag={addContentTag} onDeleteContentTag={deleteContentTag}
+                                records={records} onImport={handleImport} isAthlete={isAthlete}
+                                editingTemplateIdx={editingTemplateIdx} setEditingTemplateIdx={setEditingTemplateIdx}
+                                editTmplName={editTmplName} setEditTmplName={setEditTmplName}
+                                editTmplMenu={editTmplMenu} setEditTmplMenu={setEditTmplMenu} />}
+      </main>
+
+      {showSettings && (
+        <SettingsModal scriptUrl={scriptUrl}
+          onSave={url => setScriptUrl(url)}
+          onClose={() => setShowSettings(false)} />
+      )}
+      {showAdminPin && (
+        <AdminPinModal
+          mode={adminPin === '' ? 'set' : 'enter'}
+          savedPin={adminPin}
+          onSuccess={(newPin) => {
+            if (newPin) setAdminPin(newPin);
+            setAdminUnlocked(true);
+            setShowAdminPin(false);
+            setTab('admin');
+          }}
+          onClose={() => setShowAdminPin(false)}
+        />
+      )}
+
+      {/* テンプレ編集モーダル */}
+      {editingTemplateIdx !== null && templates[editingTemplateIdx] && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setEditingTemplateIdx(null)}>
+          <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+            <h2 className="text-base font-bold text-gray-800 mb-4">✏️ テンプレを編集</h2>
+
+            <div className="space-y-3 mb-4">
+              <label className="block">
+                <span className="text-xs text-gray-500 font-semibold mb-1 block">テンプレ名</span>
+                <input type="text" value={editTmplName} onChange={e => setEditTmplName(e.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm focus:ring-2 focus:ring-purple-300 outline-none" />
+              </label>
+
+              <label className="block">
+                <span className="text-xs text-gray-500 font-semibold mb-1 block">セッション表示名</span>
+                <textarea value={editTmplMenu} onChange={e => setEditTmplMenu(e.target.value)}
+                  rows="3"
+                  placeholder="例: 1000m×5本+200m×5本"
+                  className="w-full border rounded px-3 py-2 text-sm focus:ring-2 focus:ring-purple-300 outline-none" />
+              </label>
+
+              <div className="p-2 bg-gray-50 border border-gray-200 rounded text-xs text-gray-600">
+                <div className="font-semibold mb-1">ℹ️ ブロック内容</div>
+                <div className="max-h-32 overflow-y-auto font-mono text-xs space-y-1">
+                  {templates[editingTemplateIdx].blocks.map((b, i) => (
+                    <div key={i} className="text-gray-700">
+                      Block {i + 1}: {b.distanceM}m × {b.reps}本 {parseInt(b.sets) > 1 ? `× ${b.sets}set` : ''}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="flex gap-2 justify-end">
+              <button type="button" onClick={() => setEditingTemplateIdx(null)}
+                className="px-4 py-2 text-sm text-gray-500 hover:text-gray-700 transition-colors">
+                キャンセル
+              </button>
+              <button type="button" onClick={() => {
+                updateTemplate(editingTemplateIdx, {
+                  name: editTmplName,
+                  sessionMenu: editTmplMenu,
+                  blocks: templates[editingTemplateIdx].blocks
+                });
+                setEditingTemplateIdx(null);
+              }}
+                className="px-4 py-2 bg-purple-600 text-white text-sm font-semibold rounded-lg hover:bg-purple-700 transition-colors">
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>
